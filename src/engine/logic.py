@@ -5,6 +5,7 @@ import uuid
 from typing import Dict, List, Optional
 from collections import defaultdict, deque
 from ..services.remnawave import RemnawaveClient
+from ..services.database import DatabaseService
 
 class Alert:
     def __init__(self, level: str, message: str, metadata: Dict = None):
@@ -162,6 +163,9 @@ class ClusterHealthService:
         # Node History (for trend analysis and /graph command)
         self.node_history: Dict[str, NodeHistory] = {}
         
+        # Database (for persistent storage)
+        self.db = DatabaseService()
+        
         # Load Config
         self.config = {
             "min_users": int(os.getenv("THROTTLE_MIN_USERS", "3")),
@@ -193,8 +197,8 @@ class ClusterHealthService:
         return [str(a) for a in self.recent_alerts]
         
     def get_incident_history(self) -> List[Dict]:
-        """Return history of resolved incidents."""
-        return list(self.incident_history)
+        """Return history of resolved incidents from database."""
+        return self.db.get_incidents(limit=50)
     
     def get_node_history(self, name: str) -> Optional[NodeHistory]:
         """Return NodeHistory object for a specific node."""
@@ -255,20 +259,22 @@ class ClusterHealthService:
         
         # Velocity Calc
         velocity = 0.0
+        is_startup = False
         
         # STARTUP CHECK: If last_total is 0, this is the first run (or restart).
-        # We cannot calculate velocity yet. Just store the new total and return.
+        # We cannot calculate velocity yet. Just store the new total.
         if last_total == 0:
              state["last_total"] = total_bytes
+             is_startup = True
              logging.debug(f"Startup: Initialized baseline for {name}")
-             return
 
-        if total_bytes >= last_total:
+        if not is_startup and total_bytes >= last_total:
             diff = total_bytes - last_total
             velocity = ((diff) / elapsed) / 1024.0 # KB/s
             
         # Update State
-        state["last_total"] = total_bytes
+        if not is_startup:
+            state["last_total"] = total_bytes
         # Smooth velocity (decay)
         last_velocity = state.get("last_velocity", 0.0)
         if velocity > 0:
@@ -278,11 +284,15 @@ class ClusterHealthService:
             if smoothed_velocity < 1.0: smoothed_velocity = 0.0
         state["last_velocity"] = smoothed_velocity
         
-        # 4. Record Sample to History (for trend analysis)
+        # 4. Record Sample to History (ALWAYS - even on startup for node discovery)
         efficiency = smoothed_velocity / users if users > 0 else 0.0
         if name not in self.node_history:
             self.node_history[name] = NodeHistory(name)
         self.node_history[name].add_sample(smoothed_velocity, users, efficiency)
+        
+        # 5. Detection Logic (Skip on startup to avoid false positives)
+        if is_startup:
+            return
         
         # 5. Detection Logic (The State Machine)
         await self._update_incident_state(name, smoothed_velocity, users, alerts)
@@ -354,13 +364,15 @@ class ClusterHealthService:
                  # Actually, we just check if it stays resolved for a bit.
                  # For simplicity V2: If healthy now, mark Resolved.
                  incident.state = Incident.STATE_RESOLVED
-                 self.incident_history.append({
+                 incident_data = {
                      "node": name,
                      "issue": incident.issue_type,
                      "duration": f"{incident.duration():.0f}s",
                      "max_users": max(l["users"] for l in incident.logs),
                      "status": "Auto-Resolved (Silent)"
-                 })
+                 }
+                 # Save to database (persistent)
+                 self.db.save_incident(incident_data)
                  del self.active_incidents[name]
                  logging.info(f"LogicV2: Incident Resolved for {name} (Silent)")
             return
