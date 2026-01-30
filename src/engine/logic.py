@@ -44,6 +44,103 @@ class Incident:
     def duration(self) -> float:
         return time.time() - self.start_time
 
+class NodeHistory:
+    """Stores historical data for trend and pattern analysis."""
+    # 6 hours @ 30s intervals = 720 samples
+    MAX_SAMPLES = 720
+    
+    def __init__(self, name: str):
+        self.name = name
+        self.samples = deque(maxlen=self.MAX_SAMPLES)
+        # Hourly baselines: {hour(0-23): {"sum": float, "count": int}}
+        self.hourly_data = defaultdict(lambda: {"sum": 0.0, "count": 0})
+        
+    def add_sample(self, speed: float, users: int, efficiency: float):
+        """Record a new sample."""
+        now = time.time()
+        hour = int(time.strftime("%H"))
+        
+        self.samples.append({
+            "ts": now,
+            "speed": speed,
+            "users": users,
+            "eff": efficiency
+        })
+        
+        # Update hourly baseline (rolling average for this hour)
+        if users > 0:
+            self.hourly_data[hour]["sum"] += efficiency
+            self.hourly_data[hour]["count"] += 1
+    
+    def get_trend(self) -> Dict:
+        """Calculate trend over last 30 minutes."""
+        if len(self.samples) < 60:  # Need at least 30 mins (60 samples @ 30s)
+            return {"direction": "UNKNOWN", "change_pct": 0.0}
+        
+        # Last 10 mins (20 samples)
+        recent = list(self.samples)[-20:]
+        avg_recent = sum(s["eff"] for s in recent) / len(recent)
+        
+        # Last 30 mins (60 samples)
+        older = list(self.samples)[-60:]
+        avg_older = sum(s["eff"] for s in older) / len(older)
+        
+        if avg_older == 0:
+            return {"direction": "UNKNOWN", "change_pct": 0.0}
+        
+        change_pct = ((avg_recent - avg_older) / avg_older) * 100
+        
+        if change_pct > 15:
+            direction = "UP"
+        elif change_pct < -15:
+            direction = "DOWN"
+        else:
+            direction = "STABLE"
+            
+        return {"direction": direction, "change_pct": round(change_pct, 1)}
+    
+    def get_baseline(self, hour: int = None) -> float:
+        """Get the baseline efficiency for a given hour."""
+        if hour is None:
+            hour = int(time.strftime("%H"))
+        data = self.hourly_data.get(hour, {"sum": 0, "count": 0})
+        if data["count"] == 0:
+            return 0.0
+        return data["sum"] / data["count"]
+    
+    def get_sparkline(self, hours: int = 6) -> str:
+        """Generate ASCII sparkline for the last N hours."""
+        # Get samples for the last N hours
+        cutoff = time.time() - (hours * 3600)
+        relevant = [s for s in self.samples if s["ts"] > cutoff]
+        
+        if len(relevant) < 10:
+            return "⏳ Collecting data..."
+        
+        # Bucket into ~20 points for display
+        bucket_size = max(1, len(relevant) // 20)
+        buckets = []
+        for i in range(0, len(relevant), bucket_size):
+            chunk = relevant[i:i+bucket_size]
+            avg_eff = sum(s["eff"] for s in chunk) / len(chunk)
+            buckets.append(avg_eff)
+        
+        if not buckets:
+            return "⏳ Collecting data..."
+        
+        # Normalize to sparkline chars
+        chars = "▁▂▃▄▅▆▇█"
+        min_val = min(buckets)
+        max_val = max(buckets)
+        range_val = max_val - min_val if max_val > min_val else 1
+        
+        sparkline = ""
+        for val in buckets:
+            idx = int(((val - min_val) / range_val) * (len(chars) - 1))
+            sparkline += chars[idx]
+        
+        return sparkline
+
 class ClusterHealthService:
     def __init__(self, api_client: RemnawaveClient):
         self.api_client = api_client
@@ -62,6 +159,9 @@ class ClusterHealthService:
         # Recent Alerts (for /alerts command)
         self.recent_alerts = deque(maxlen=20)
         
+        # Node History (for trend analysis and /graph command)
+        self.node_history: Dict[str, NodeHistory] = {}
+        
         # Load Config
         self.config = {
             "min_users": int(os.getenv("THROTTLE_MIN_USERS", "3")),
@@ -71,7 +171,8 @@ class ClusterHealthService:
         
         # Tuning Constants
         self.VERIFY_DURATION = 300 # 5 minutes to verify
-        self.FAST_TRACK_SPEED = 10.0 # < 10KB/s with users is instant alert
+        self.FAST_TRACK_SPEED = 1.0 # < 1KB/s (virtually zero) with HIGH users is instant alert
+        self.FAST_TRACK_USERS = 10 # Need significant load for Fast Track
 
     def get_config(self) -> Dict:
         return self.config
@@ -94,6 +195,14 @@ class ClusterHealthService:
     def get_incident_history(self) -> List[Dict]:
         """Return history of resolved incidents."""
         return list(self.incident_history)
+    
+    def get_node_history(self, name: str) -> Optional[NodeHistory]:
+        """Return NodeHistory object for a specific node."""
+        return self.node_history.get(name)
+    
+    def get_all_node_names(self) -> List[str]:
+        """Return list of all tracked node names."""
+        return list(self.node_history.keys())
 
     async def check_cluster(self) -> List[Alert]:
         alerts = []
@@ -146,7 +255,15 @@ class ClusterHealthService:
         
         # Velocity Calc
         velocity = 0.0
-        if last_total > 0 and total_bytes >= last_total:
+        
+        # STARTUP CHECK: If last_total is 0, this is the first run (or restart).
+        # We cannot calculate velocity yet. Just store the new total and return.
+        if last_total == 0:
+             state["last_total"] = total_bytes
+             logging.debug(f"Startup: Initialized baseline for {name}")
+             return
+
+        if total_bytes >= last_total:
             diff = total_bytes - last_total
             velocity = ((diff) / elapsed) / 1024.0 # KB/s
             
@@ -161,7 +278,13 @@ class ClusterHealthService:
             if smoothed_velocity < 1.0: smoothed_velocity = 0.0
         state["last_velocity"] = smoothed_velocity
         
-        # 3. Detection Logic (The State Machine)
+        # 4. Record Sample to History (for trend analysis)
+        efficiency = smoothed_velocity / users if users > 0 else 0.0
+        if name not in self.node_history:
+            self.node_history[name] = NodeHistory(name)
+        self.node_history[name].add_sample(smoothed_velocity, users, efficiency)
+        
+        # 5. Detection Logic (The State Machine)
         await self._update_incident_state(name, smoothed_velocity, users, alerts)
 
 
@@ -188,9 +311,9 @@ class ClusterHealthService:
                 is_bad = True
                 issue_type = "LOW_EFFICIENCY"
             
-            # Rule 2: GFW Signature (High Users, Zero Speed)
-            # This is the "Fast Track" rule
-            if speed < self.FAST_TRACK_SPEED:
+            # Rule 2: GFW Signature (HIGH Users, ZERO Speed)
+            # This is the "Fast Track" rule - Only triggers with significant load + near-zero traffic
+            if users >= self.FAST_TRACK_USERS and speed < self.FAST_TRACK_SPEED:
                 is_bad = True
                 issue_type = "GHOST_THROTTLE" # GFW signature
         

@@ -45,6 +45,8 @@ class TelegramBot:
         self.dp.message.register(self.cmd_alerts, Command("alerts"))
         self.dp.message.register(self.cmd_reports, Command("reports"))
         self.dp.message.register(self.cmd_top, Command("top"))
+        self.dp.message.register(self.cmd_graph, Command("graph"))
+        self.dp.message.register(self.cmd_node, Command("node"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
@@ -143,7 +145,9 @@ class TelegramBot:
             "/nodes - Node List & Bandwidth\n"
             "/top - Top Nodes by Load\n"
             "/alerts - Recent History\n"
-            "/reports - Silent Incidents\n\n"
+            "/reports - Silent Incidents\n"
+            "/graph - 6-Hour Efficiency Chart\n"
+            "/node &lt;name&gt; - Deep Dive Stats\n\n"
             "<b>Configuration</b>\n"
             "/config - View/Edit Thresholds\n"
             "<i>(Usage: /config set users 5)</i>"
@@ -309,3 +313,89 @@ class TelegramBot:
             msg += f"   Duration: {h['duration']} | Max Users: {h['max_users']}\n\n"
             
         await message.answer(msg, parse_mode="HTML")
+
+    async def cmd_graph(self, message: types.Message):
+        """Show efficiency sparklines for all nodes."""
+        node_names = self.health_service.get_all_node_names()
+        
+        if not node_names:
+            await message.answer("⏳ No data yet. Please wait a few minutes for data collection.")
+            return
+        
+        msg = "📊 <b>6-Hour Efficiency Chart</b>\n\n"
+        
+        for name in sorted(node_names):
+            history = self.health_service.get_node_history(name)
+            if history:
+                sparkline = history.get_sparkline(hours=6)
+                trend = history.get_trend()
+                
+                trend_emoji = {
+                    "UP": "📈",
+                    "DOWN": "📉",
+                    "STABLE": "➡️",
+                    "UNKNOWN": "❓"
+                }.get(trend["direction"], "❓")
+                
+                msg += f"<b>{name}</b>\n"
+                msg += f"{sparkline} {trend_emoji} ({trend['change_pct']:+.1f}%)\n\n"
+        
+        await message.answer(msg, parse_mode="HTML")
+
+    async def cmd_node(self, message: types.Message):
+        """Deep dive into a specific node."""
+        # Parse node name from command
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "Usage: <code>/node Node-Name</code>\n\n"
+                "Available nodes:\n" + 
+                "\n".join(f"• {n}" for n in self.health_service.get_all_node_names()),
+                parse_mode="HTML"
+            )
+            return
+        
+        node_name = parts[1].strip()
+        history = self.health_service.get_node_history(node_name)
+        
+        if not history:
+            await message.answer(f"❌ Node '{node_name}' not found or no data yet.")
+            return
+        
+        # Get latest sample
+        if history.samples:
+            latest = history.samples[-1]
+            speed = latest["speed"]
+            users = latest["users"]
+            eff = latest["eff"]
+        else:
+            speed = users = eff = 0
+        
+        # Get stats
+        trend = history.get_trend()
+        baseline = history.get_baseline()
+        sparkline = history.get_sparkline(hours=6)
+        
+        trend_emoji = {"UP": "📈", "DOWN": "📉", "STABLE": "➡️", "UNKNOWN": "❓"}.get(trend["direction"], "❓")
+        
+        # Check for active incident
+        incident = self.health_service.active_incidents.get(node_name)
+        incident_text = "None" if not incident else f"⚠️ {incident.issue_type} ({incident.state})"
+        
+        import time as time_module
+        current_hour = int(time_module.strftime("%H"))
+        
+        msg = (
+            f"📍 <b>Node: {node_name}</b>\n\n"
+            f"<b>Current Status</b>\n"
+            f"Users: {users} | Speed: {speed:.1f} KB/s\n"
+            f"Efficiency: {eff:.1f} KB/s/user\n\n"
+            f"<b>Trend (30 min)</b>: {trend_emoji} {trend['change_pct']:+.1f}%\n"
+            f"<b>Baseline (Hour {current_hour})</b>: {baseline:.1f} KB/s/user\n"
+            f"<b>Active Incident</b>: {incident_text}\n\n"
+            f"<b>Last 6 Hours</b>\n"
+            f"{sparkline}"
+        )
+        
+        await message.answer(msg, parse_mode="HTML")
+
