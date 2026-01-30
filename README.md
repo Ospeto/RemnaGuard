@@ -2,52 +2,35 @@
 
 **RemnaGuard** is a centralized, intelligent monitoring companion for **Remnawave**. It protects your cluster from Great Firewall (GFW) throttling by analyzing traffic patterns and detecting "Chronic Congestion" before it affects your users.
 
-Unlike basic monitors that spam you with "Speed = 0" alerts every time a user pauses a video, RemnaGuard uses advanced statistical analysis and a **3-Stage Verification Pipeline** to ensure that **every alert is real**.
+Unlike basic monitors that spam you with "Speed = 0" alerts every time a user pauses a video, RemnaGuard uses an **Incident State Machine** to verify anomalies before alerting.
+
+🔗 **Repository**: [https://github.com/Ospeto/RemnaGuard](https://github.com/Ospeto/RemnaGuard)
 
 ---
 
-## 🧠 How It Works (The Logic)
+## 🧠 How It Works (Logic V2)
 
-RemnaGuard is built on the philosophy of **"Silence is Golden"**. It will stay quiet during normal operation and only alert you when a node is **consistently failing** to deliver the expected performance.
+RemnaGuard is built on the philosophy of **"Silence is Golden, but Logs are Diamond"**. It avoids alerting on minor fluctuations but maintains a strict watch on potential threats.
 
-### 1. The Metric: "Per-User Efficiency"
-Total speed is a bad metric. 100 users doing 1 MB/s is "fast" (100 MB/s total), but the experience is terrible (10 KB/s per user).
-RemnaGuard calculates **Efficiency**:
-```math
-Efficiency = Total Speed / Active Users
-```
-*If a node has 10 users and is pushing 500 KB/s, the efficiency is 50 KB/s/user. (Too slow!)*
+### 1. The Incident State Machine 🚦
+Instead of alerting instantly, RemnaGuard tracks suspicious events through a lifecycle:
 
-### 2. The 3-Stage Verification Pipeline 🛡️
-To eliminate false positives (statistical noise, temporary dips, scheduled restarts), RemnaGuard uses a strict multi-stage filter. A node must fail **ALL** active stages to trigger an alert.
+1.  **🟢 Healthy**: Normal operation.
+2.  **🟡 Suspicious (Log Mode)**: 
+    *   **Trigger**: Speed drops below threshold (e.g., < 20 KB/s/user).
+    *   **Action**: An "Incident" is recorded internally. **No Alert is sent.**
+3.  **🟠 Verifying**: 
+    *   **Logic**: The system watches the node for ~1-5 minutes.
+    *   **Auto-Resolve**: If performance recovers, the incident is closed silently. You can view these in `/reports`.
+    *   **Escalate**: If performance remains bad, it moves to **Confirmed**.
+4.  **🔴 Confirmed (Alert)**: 
+    *   **Action**: A notification is sent to Telegram immediately.
 
-| Stage | Duration | Logic | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Stage 1** | **1 Hour** | Checks the average efficiency for the last 60 minutes. | Filters out brief spikes or user idle time. |
-| **Stage 2** | **3 Hours** | *Mandatory*: Checks the 3-hour average. | Confirms the issue is not just a "bad hour". |
-| **Stage 3** | **5 Hours** | *If available*, checks the 5-hour average. | Confirms **Chronic Throttling**. |
+### 2. GFW Fast Track (The "Red Line") 🚨
+Some threats require immediate action. If RemnaGuard detects a **GFW Signature**, it bypasses the proper verification steps and alerts **instantly**.
 
-**The Alert Rule:**
-> 🚨 **ALERT** = (Stage 1 is BAD) **AND** (Stage 2 is BAD) **AND** (Stage 3 is BAD)
-> *Note: At least 3 hours of data is required before the first alert.*
-
-**The Recovery Rule:**
-> If **Stage 1** (Last Hour) becomes HEALTHY (> 100 KB/s/user), the alert is **BLOCKED** immediately, even if the long-term history is still bad. This allows for instant detection of fixes.
-
----
-
-### 🇲🇲 Alert ပေးပို့ပုံ ရှင်းလင်းချက် (Myanmar)
-
-RemnaGuard က Alert ဘယ်လိုပေးလဲဆိုတာကို အပတ်တကုတ် ရှင်းပြထားပါတယ်-
-
-- **ဘယ်အချိန်မှာ Alert ပေးမလဲ?**: Node တစ်ခုရဲ့ Efficiency (User တစ်ဦးချင်းစီ ရရှိတဲ့ အောက်ဆိုဒ်နှုန်း) ဟာ သတ်မှတ်ထားတဲ့ Limit (ဥပမာ: 100 KB/s/user) အောက်ကို ဆက်တိုက် ကျဆင်းနေမှသာ Alert ပေးမှာ ဖြစ်ပါတယ်။
-- **False Alert မဖြစ်အောင် ဘယ်လိုစစ်လဲ?**:
-    1. **Stage 1 (၁ နာရီ ပျမ်းမျှ)**: နောက်ဆုံး ၁ နာရီအတွင်း အမြန်နှုန်းဟာ သတ်မှတ်ချက်အောက် ရောက်နေရပါမယ်။
-    2. **Stage 2 (၃ နာရီ ပျမ်းမျှ)**: နောက်ဆုံး ၃ နာရီအတွင်း အမြန်နှုန်းဟာလည်း သတ်မှတ်ချက်အောက်မှာပဲ ရှိနေရပါမယ်။ (Alert တက်ဖို့ အနည်းဆုံး ၃ နာရီစာ ဒေတာ လိုအပ်ပါတယ်။)
-    3. **Stage 3 (၅ နာရီ ပျမ်းမျှ)**: ၅ နာရီစာ ဒေတာရှိနေရင် ၅ နာရီ ပျမ်းမျှနှုန်းကိုပါ ထပ်စစ်ပါမယ်။
-- **အခြေအနေ ပြန်ကောင်းရင် ဘာဖြစ်မလဲ?**: အကယ်၍ နောက်ဆုံး ၁ နာရီအတွင်း အခြေအနေ ပြန်ကောင်းလာရင် (ဥပမာ: > 100 KB/s/user ရောက်သွားရင်) ရှေ့က နာရီတွေမှာ ဘယ်လောက်ပဲ အခြေအနေ ဆိုးခဲ့ဆိုးခဲ့ Alert ပေးပို့မှုကို ချက်ချင်း ရပ်တန့် (Block) မှာ ဖြစ်ပါတယ်။
-
----
+> **Signature**: Active Users > 3 **AND** Speed near Zero (< 10 KB/s)
+> **Result**: `🚨 GFW LOCK DETECTED` (Critical Alert)
 
 ---
 
@@ -60,8 +43,9 @@ RemnaGuard lives in your Telegram group.
 | `/status` | **System Health**: Checks connection to Remnawave API and Bot host stats (CPU/RAM). |
 | `/nodes` | **Cluster Overview**: Lists all nodes, their status (Online/Offline), and Active Users. |
 | `/top` | **Top Nodes**: Lists the top 5 busiest nodes by active user count. |
-| `/alerts` | **History**: Shows the last 10 alerts generated by the system. |
-| `/config` | **Interactive Settings**: Change detection thresholds (Min Users, Min Speed, Efficiency) on the fly without restarting. |
+| `/alerts` | **Alert History**: Shows the last 10 CRITICAL/WARNING alerts. |
+| `/reports` | **Silent Incidents**: *[NEW]* Shows incidents that were detected but Auto-Resolved without bothering you. |
+| `/config` | **Settings**: Change detection thresholds (Min Users, Min Speed, Efficiency) on the fly. |
 
 ---
 
@@ -72,8 +56,8 @@ You can tune the sensitivity via `.env` or the `/config` command.
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `THROTTLE_MIN_USERS` | `3` | Minimum active users required to start monitoring a node. (Ignores empty nodes). |
-| `THROTTLE_SPEED_LIMIT`| `50` | (Legacy) Absolute minimum speed in KB/s. |
-| `THROTTLE_PER_USER` | `100` | **Crucial**: The minimum acceptable speed per user (KB/s). |
+| `THROTTLE_SPEED_LIMIT`| `50` | Total bandwidth floor (KB/s). Below this is suspicious. |
+| `THROTTLE_PER_USER` | `20` | Minimum acceptable speed per user (KB/s). |
 
 ---
 
@@ -87,38 +71,31 @@ You can tune the sensitivity via `.env` or the `/config` command.
 ### Quick Start
 1. **Clone the Repo**
    ```bash
-   git clone https://github.com/YourRepo/RemnaGuard.git
+   git clone https://github.com/Ospeto/RemnaGuard.git
    cd RemnaGuard
    ```
 
 2. **Configure**
    ```bash
-   cp .env.example .env
-   nano .env
-   # Fill in TELEGRAM_BOT_TOKEN, REMNAWAVE_URL, REMNAWAVE_TOKEN
-   ```
-
-3. **Install & Run**
-   ```bash
+   # Run the installer
    chmod +x install.sh
    ./install.sh
    ```
+   *The installer will guide you through setting up your tokens and deploying the container.*
 
-### Updating
-To update the bot code or logic:
-```bash
-git pull
-./install.sh
-# Type 'Y' to rebuild the container
-```
+3. **Updating**
+   ```bash
+   git pull
+   ./install.sh
+   ```
 
 ---
 
 ## 📂 Architecture
 
 - **`src/main.py`**: Entry point. Manages the AsyncIO Loop.
-- **`src/bot/`**: Telegram Bot logic (Aiogram). Handles user commands and specific alert formatting.
-- **`src/engine/logic.py`**: The "Brain". Stores 5 hours of rolling history for every node and runs the 3-Stage Verification.
+- **`src/bot/`**: Telegram Bot logic (Aiogram). Handles user commands.
+- **`src/engine/logic.py`**: The "Brain". Implements the **Incident State Machine** and GFW signature detection.
 - **`src/services/`**: 
-  - `remnawave.py`: Persistent HTTP client for the Panel API.
-  - `monitor.py`: System resource monitoring (CPU/RAM).
+  - `remnawave.py`: Robust HTTP client for the Panel API (with JSON error handling).
+  - `monitor.py`: System resource monitoring.

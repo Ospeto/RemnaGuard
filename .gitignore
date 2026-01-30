@@ -1,0 +1,15 @@
+# Secrets
+.env
+.env.local
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+verify_venv/
+
+# System
+.DS_Store
+Thumbs.db
