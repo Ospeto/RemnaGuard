@@ -50,6 +50,7 @@ class TelegramBot:
         self.dp.message.register(self.cmd_node, Command("node"))
         self.dp.message.register(self.cmd_uptime, Command("uptime"))
         self.dp.message.register(self.cmd_digest, Command("digest"))
+        self.dp.message.register(self.cmd_analyze, Command("analyze"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
@@ -731,4 +732,37 @@ class TelegramBot:
             [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
         ])
         await message.answer(msg, parse_mode="HTML", reply_markup=keyboard)
+
+    async def cmd_analyze(self, message: types.Message):
+        """Ask AI to analyze a specific node."""
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            # Show list of nodes to analyze
+            node_names = self.health_service.get_all_node_names()
+            msg = "🧠 <b>AI Analysis</b>\nUsage: <code>/analyze [node_name]</code>\n\nAvailable Nodes:\n"
+            for name in sorted(node_names):
+                msg += f"• <code>{name}</code>\n"
+            await message.answer(msg, parse_mode="HTML")
+            return
+            
+        node_name = args[1]
+        history = self.health_service.get_node_history(node_name)
+        if not history:
+             await message.answer(f"⚠️ Node '{node_name}' not found or no history available.")
+             return
+             
+        # Notify user (since AI can be slow)
+        processing_msg = await message.answer(f"🧠 Asking Gemini AI to analyze <b>{node_name}</b>...")
+        await self.bot.send_chat_action(message.chat.id, "typing")
+        
+        # Get history as list of dicts
+        history_data = list(history.samples)[-50:] # Last 50 samples
+        
+        # Call AI
+        analysis = await self.health_service.ai.analyze_node(node_name, history_data)
+        
+        # Format response
+        msg = f"🧠 <b>AI Analysis: {node_name}</b>\n\n{analysis}"
+        
+        await processing_msg.edit_text(msg, parse_mode="Markdown")
 

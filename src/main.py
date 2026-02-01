@@ -100,6 +100,27 @@ async def digest_loop(health_service: 'ClusterHealthService', bot: TelegramBot):
         # Check every 5 minutes
         await asyncio.sleep(300)
 
+async def smart_baseline_loop(health_service: 'ClusterHealthService'):
+    """Update AI Smart Baselines 4 times a day (every 6 hours)."""
+    import time
+    
+    # Schedule: 0, 6, 12, 18 hours
+    target_hours = [0, 6, 12, 18]
+    
+    while True:
+        now = time.localtime()
+        current_hour = now.tm_hour
+        current_min = now.tm_min
+        
+        # Run in the first 5 mins of target hours
+        if current_hour in target_hours and current_min < 5:
+            logging.info("Starting scheduled AI Smart Baseline update...")
+            await health_service.update_smart_baselines()
+            # Sleep for an hour to avoid re-triggering
+            await asyncio.sleep(3600)
+            
+        # Check every 5 mins
+        await asyncio.sleep(300)
 
 async def main():
     # Initialize Services
@@ -116,6 +137,7 @@ async def main():
     asyncio.create_task(heartbeat_loop(bot))
     asyncio.create_task(cluster_loop(health_service, bot))
     asyncio.create_task(digest_loop(health_service, bot))
+    asyncio.create_task(smart_baseline_loop(health_service))
     
     # Start Bot (this will block main thread)
     logging.info("Starting Telegram Bot...")

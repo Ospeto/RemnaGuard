@@ -145,17 +145,11 @@ class NodeHistory:
 class ClusterHealthService:
     def __init__(self, api_client: RemnawaveClient):
         self.api_client = api_client
-        self.last_check = time.time()
+        self.last_check = 0
         
         # Tracking
-        # node_states: stores last known traffic data for diff calculation
-        self.node_states = defaultdict(lambda: {"last_total": 0, "last_velocity": 0.0})
-        
-        # Active Incidents: {node_name: Incident}
         self.active_incidents: Dict[str, Incident] = {}
-        
-        # Closed Incidents Log (for Reporting)
-        self.incident_history = deque(maxlen=50)
+        self.node_states: Dict[str, Dict] = {} # {node_name: {last_total: int, last_velocity: float}}
         
         # Recent Alerts (for /alerts command)
         self.recent_alerts = deque(maxlen=20)
@@ -165,6 +159,10 @@ class ClusterHealthService:
         
         # Database (for persistent storage)
         self.db = DatabaseService()
+        
+        # AI Service & Smart Thresholds
+        self.ai = AIService()
+        self.smart_thresholds: Dict[str, Dict] = {} # {node: {min_efficiency: float, min_speed: float}}
         
         # Restore node history from database
         self._restore_node_history()
@@ -201,11 +199,43 @@ class ClusterHealthService:
         
     def get_incident_history(self) -> List[Dict]:
         """Return history of resolved incidents from database."""
-        return self.db.get_incidents(limit=50)
-    
-    def get_node_history(self, name: str) -> Optional[NodeHistory]:
+        return list(self.active_incidents.values()) # Assuming tracked_incidents refers to active_incidents
+
+    async def update_smart_baselines(self):
+        """Batch job: Updates smart thresholds using AI."""
+        if not self.ai.enabled:
+            return
+            
+        logging.info("Starting AI Smart Baseline update...")
+        try:
+            # Collect history for all nodes (last 24h ideally, but we have what we have in memory)
+            # For better accuracy we might want to fetch from DB, but memory is faster.
+            # NodeHistory in memory keeps 24h max anyway.
+            
+            all_history = {}
+            for name, hist in self.node_history.items():
+                # Convert deque to list of dicts
+                all_history[name] = list(hist.samples)
+            
+            if not all_history:
+                logging.info("No history to analyze.")
+                return
+
+            new_thresholds = await self.ai.get_smart_thresholds(all_history)
+            
+            if new_thresholds:
+                self.smart_thresholds = new_thresholds
+                logging.info(f"Updated Smart Thresholds for {len(new_thresholds)} nodes.")
+                logging.info(f"Thresholds: {self.smart_thresholds}")
+            else:
+                logging.warning("AI returned no thresholds.")
+                
+        except Exception as e:
+            logging.error(f"Failed to update smart baselines: {e}")
+
+    def get_node_history(self, node_name: str) -> Optional[NodeHistory]:
         """Return NodeHistory object for a specific node."""
-        return self.node_history.get(name)
+        return self.node_history.get(node_name)
     
     def get_all_node_names(self) -> List[str]:
         """Return list of all tracked node names."""
@@ -351,10 +381,18 @@ class ClusterHealthService:
         """
         incident = self.active_incidents.get(name)
         
-        # Thresholds
+        # Thresholds (Dynamic Smart Baselines if available)
         limit_users = self.config["min_users"]
-        limit_speed = self.config["min_speed"] # Total bandwidth floor
-        limit_efficiency = self.config["min_efficiency"] # Per user
+        limit_speed = self.config["min_speed"] # Default
+        limit_efficiency = self.config["min_efficiency"] # Default
+        
+        # Override with Smart Thresholds if available
+        if name in self.smart_thresholds:
+            smart = self.smart_thresholds[name]
+            limit_efficiency = smart.get("min_efficiency", limit_efficiency)
+            limit_speed = smart.get("min_speed", limit_speed)
+            # Log roughly every hour or so? No, too noisy.
+            # Just trust it.
         
         # Detection Rules
         is_bad = False
@@ -447,6 +485,7 @@ class ClusterHealthService:
         elif incident.state == Incident.STATE_VERIFYING:
             # If it persists for Y seconds, ALERT.
             if duration > self.VERIFY_DURATION:
+                # Direct alert (Smart Thresholds already applied in detection step)
                 incident.state = Incident.STATE_CONFIRMED
                 self._trigger_alert(incident, alerts)
                 

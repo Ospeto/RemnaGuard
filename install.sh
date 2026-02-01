@@ -105,8 +105,24 @@ if [ -f .env ]; then
     SKIP_CONFIG=${SKIP_CONFIG:-Y}
     
     if [[ "$SKIP_CONFIG" =~ ^[Yy]$ ]]; then
-        echo ">>> Skipping configuration..."
+        echo ">>> Skipping core configuration..."
         source .env
+        
+        # Check if Gemini Key is missing in existing env (for upgrade path)
+        if [ -z "$GEMINI_API_KEY" ]; then
+             echo "----------------------------------------"
+             echo "🤖 AI Integration (Gemini)"
+             echo "----------------------------------------"
+             echo "To enable Smart Baselines and Anti-False-Positive verification,"
+             echo "you need a Google Gemini API Key."
+             read_input "Gemini API Key (Leave blank to disableAI)" "" "GEMINI_API_KEY" "true"
+             
+             if [ -n "$GEMINI_API_KEY" ]; then
+                 echo "GEMINI_API_KEY=$GEMINI_API_KEY" >> .env
+                 echo ">>> Added Gemini Key to existing configuration."
+             fi
+        fi
+        
         # Jump to Deploy immediately
         deploy
         exit 0
@@ -119,6 +135,11 @@ read_input "Remnawave URL" "${REMNAWAVE_URL:-http://<PANEL_IP>:3000}" "INPUT_URL
 read_input "Remnawave API Token" "${REMNAWAVE_TOKEN}" "INPUT_TOKEN" "true"
 read_input "Telegram Bot Token" "${TELEGRAM_BOT_TOKEN}" "INPUT_BOT_TOKEN" "true"
 read_input "Admin IDs (comma separated)" "${ADMIN_IDS}" "INPUT_ADMINS"
+
+echo "----------------------------------------"
+echo "🤖 AI Integration (Gemini)"
+echo "----------------------------------------"
+read_input "Gemini API Key (Leave blank to disable AI)" "${GEMINI_API_KEY}" "INPUT_GEMINI_KEY" "true"
 
 echo ">>> Generating .env file..."
 
@@ -133,6 +154,7 @@ REMNAWAVE_URL=$INPUT_URL
 REMNAWAVE_TOKEN=$INPUT_TOKEN
 TELEGRAM_BOT_TOKEN=$INPUT_BOT_TOKEN
 ADMIN_IDS=$INPUT_ADMINS
+GEMINI_API_KEY=$INPUT_GEMINI_KEY
 
 # Config
 LOG_LEVEL=INFO
