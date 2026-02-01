@@ -4,6 +4,7 @@ import logging
 import html
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from .middleware import AuthMiddleware
 from ..engine.logic import Alert
 from ..services.remnawave import RemnawaveClient
@@ -50,6 +51,8 @@ class TelegramBot:
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
+        self.dp.callback_query.register(self.process_menu_callback, lambda c: c.data and c.data.startswith("menu_"))
+        self.dp.callback_query.register(self.process_node_callback, lambda c: c.data and c.data.startswith("node_"))
 
     async def start(self):
         await self.dp.start_polling(self.bot)
@@ -130,12 +133,32 @@ class TelegramBot:
 
     # Commands
     async def cmd_start(self, message: types.Message):
+        """Main menu with interactive buttons."""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Status", callback_data="menu_status"),
+                InlineKeyboardButton(text="🖥️ Nodes", callback_data="menu_nodes")
+            ],
+            [
+                InlineKeyboardButton(text="📈 Graph", callback_data="menu_graph"),
+                InlineKeyboardButton(text="🔝 Top", callback_data="menu_top")
+            ],
+            [
+                InlineKeyboardButton(text="🚨 Alerts", callback_data="menu_alerts"),
+                InlineKeyboardButton(text="📋 Reports", callback_data="menu_reports")
+            ],
+            [
+                InlineKeyboardButton(text="⚙️ Config", callback_data="menu_config"),
+                InlineKeyboardButton(text="❓ Help", callback_data="menu_help")
+            ]
+        ])
+        
         await message.answer(
             "🛡️ <b>RemnaGuard Central</b>\n"
             "Monitoring your entire cluster via API.\n\n"
-            "/status - Cluster Health & Stats\n"
-            "/nodes - List All Nodes\n",
-            parse_mode="HTML"
+            "Select an option below:",
+            parse_mode="HTML",
+            reply_markup=keyboard
         )
     async def cmd_help(self, message: types.Message):
         help_text = (
@@ -397,5 +420,221 @@ class TelegramBot:
             f"{sparkline}"
         )
         
-        await message.answer(msg, parse_mode="HTML")
+        # Add back button
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back to Nodes", callback_data="menu_nodes")],
+            [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+        ])
+        
+        await message.answer(msg, parse_mode="HTML", reply_markup=keyboard)
 
+    # === CALLBACK HANDLERS ===
+    
+    async def process_menu_callback(self, callback: types.CallbackQuery):
+        """Handle main menu button presses."""
+        action = callback.data.replace("menu_", "")
+        
+        if action == "main":
+            # Show main menu
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📊 Status", callback_data="menu_status"),
+                    InlineKeyboardButton(text="🖥️ Nodes", callback_data="menu_nodes")
+                ],
+                [
+                    InlineKeyboardButton(text="📈 Graph", callback_data="menu_graph"),
+                    InlineKeyboardButton(text="🔝 Top", callback_data="menu_top")
+                ],
+                [
+                    InlineKeyboardButton(text="🚨 Alerts", callback_data="menu_alerts"),
+                    InlineKeyboardButton(text="📋 Reports", callback_data="menu_reports")
+                ],
+                [
+                    InlineKeyboardButton(text="⚙️ Config", callback_data="menu_config"),
+                    InlineKeyboardButton(text="❓ Help", callback_data="menu_help")
+                ]
+            ])
+            await callback.message.edit_text(
+                "🛡️ <b>RemnaGuard Central</b>\n"
+                "Monitoring your entire cluster via API.\n\n"
+                "Select an option below:",
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+            
+        elif action == "status":
+            text = await self.generate_status_text()
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu_status")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+            
+        elif action == "nodes":
+            # Show node list with buttons
+            node_names = self.health_service.get_all_node_names()
+            if not node_names:
+                await callback.message.edit_text(
+                    "⏳ No nodes tracked yet. Wait for first check.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+                    ])
+                )
+            else:
+                buttons = []
+                for name in sorted(node_names):
+                    buttons.append([InlineKeyboardButton(text=f"📍 {name}", callback_data=f"node_{name}")])
+                buttons.append([InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")])
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+                await callback.message.edit_text(
+                    "🖥️ <b>Select a Node</b>",
+                    parse_mode="HTML",
+                    reply_markup=keyboard
+                )
+                
+        elif action == "graph":
+            node_names = self.health_service.get_all_node_names()
+            if not node_names:
+                msg = "⏳ No data yet. Please wait a few minutes for data collection."
+            else:
+                msg = "📊 <b>6-Hour Efficiency Chart</b>\n\n"
+                for name in sorted(node_names):
+                    history = self.health_service.get_node_history(name)
+                    if history:
+                        sparkline = history.get_sparkline(hours=6)
+                        trend = history.get_trend()
+                        trend_emoji = {"UP": "📈", "DOWN": "📉", "STABLE": "➡️", "UNKNOWN": "❓"}.get(trend["direction"], "❓")
+                        msg += f"<b>{name}</b>\n{sparkline} {trend_emoji} ({trend['change_pct']:+.1f}%)\n\n"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu_graph")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+            
+        elif action == "top":
+            nodes = await self.remnawave.get_nodes()
+            if not nodes:
+                msg = "⚠️ No nodes found."
+            else:
+                sorted_nodes = sorted(nodes, key=lambda n: int(n.get("usersOnline") or 0), reverse=True)[:5]
+                msg = "🔝 <b>Top 5 Nodes by Load</b>\n\n"
+                for i, node in enumerate(sorted_nodes, 1):
+                    name = node.get("name", "Unknown")
+                    users = int(node.get("usersOnline") or 0)
+                    msg += f"{i}. <b>{name}</b>: {users} users\n"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu_top")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+            
+        elif action == "alerts":
+            alerts = self.health_service.get_recent_alerts()
+            if not alerts:
+                msg = "✅ No recent alerts."
+            else:
+                msg = "🚨 <b>Recent Alerts</b>\n\n"
+                for alert in alerts[-10:]:
+                    msg += f"• {alert}\n"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+            
+        elif action == "reports":
+            history = self.health_service.get_incident_history()
+            if not history:
+                msg = "📋 No silent incidents recorded recently."
+            else:
+                msg = "📋 <b>Incident Report (Last 50)</b>\n\n"
+                for h in history[:10]:  # Show last 10
+                    msg += f"• <b>{h.get('node', 'Unknown')}</b>: {h.get('issue', 'Unknown')}\n"
+                    msg += f"   Duration: {h.get('duration', 'N/A')} | Status: {h.get('status', 'N/A')}\n\n"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+            
+        elif action == "config":
+            config = self.health_service.get_config()
+            msg = (
+                "⚙️ <b>Current Configuration</b>\n\n"
+                f"• <b>Min Users</b>: {config['min_users']}\n"
+                f"• <b>Min Speed</b>: {config['min_speed']} KB/s\n"
+                f"• <b>Min Efficiency</b>: {config['min_efficiency']} KB/s/user\n\n"
+                "Use /config set [key] [value] to change."
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+            
+        elif action == "help":
+            msg = (
+                "🛡️ <b>RemnaGuard Help</b>\n\n"
+                "<b>📊 Status</b> - System & API Health\n"
+                "<b>🖥️ Nodes</b> - Select individual nodes\n"
+                "<b>📈 Graph</b> - 6-Hour efficiency sparklines\n"
+                "<b>🔝 Top</b> - Busiest nodes\n"
+                "<b>🚨 Alerts</b> - Recent alert history\n"
+                "<b>📋 Reports</b> - Silent incidents\n"
+                "<b>⚙️ Config</b> - View/edit thresholds"
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+        
+        await callback.answer()
+
+    async def process_node_callback(self, callback: types.CallbackQuery):
+        """Handle node selection button presses."""
+        node_name = callback.data.replace("node_", "")
+        history = self.health_service.get_node_history(node_name)
+        
+        if not history:
+            await callback.answer(f"Node '{node_name}' not found!", show_alert=True)
+            return
+        
+        # Get latest sample
+        if history.samples:
+            latest = history.samples[-1]
+            speed = latest["speed"]
+            users = latest["users"]
+            eff = latest["eff"]
+        else:
+            speed = users = eff = 0
+        
+        # Get stats
+        trend = history.get_trend()
+        baseline = history.get_baseline()
+        sparkline = history.get_sparkline(hours=6)
+        
+        import time as time_module
+        current_hour = int(time_module.strftime("%H"))
+        trend_emoji = {"UP": "📈", "DOWN": "📉", "STABLE": "➡️", "UNKNOWN": "❓"}.get(trend["direction"], "❓")
+        
+        # Check for active incident
+        incident = self.health_service.active_incidents.get(node_name)
+        incident_text = "None" if not incident else f"⚠️ {incident.issue_type} ({incident.state})"
+        
+        msg = (
+            f"📍 <b>Node: {node_name}</b>\n\n"
+            f"<b>Current Status</b>\n"
+            f"Users: {users} | Speed: {speed:.1f} KB/s\n"
+            f"Efficiency: {eff:.1f} KB/s/user\n\n"
+            f"<b>Trend (30 min)</b>: {trend_emoji} {trend['change_pct']:+.1f}%\n"
+            f"<b>Baseline (Hour {current_hour})</b>: {baseline:.1f} KB/s/user\n"
+            f"<b>Active Incident</b>: {incident_text}\n\n"
+            f"<b>Last 6 Hours</b>\n"
+            f"{sparkline}"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh", callback_data=f"node_{node_name}")],
+            [InlineKeyboardButton(text="⬅️ Back to Nodes", callback_data="menu_nodes")],
+            [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+        ])
+        
+        await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+        await callback.answer()
