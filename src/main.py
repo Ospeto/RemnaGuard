@@ -143,8 +143,11 @@ async def main():
     asyncio.create_task(digest_loop(health_service, bot))
     asyncio.create_task(smart_baseline_loop(health_service))
     
-    # Start Bot (this will block main thread)
-    logging.info("Starting Telegram Bot...")
+    # PHASE 15: Immediate Startup Sync
+    if health_service.cf.enabled:
+        logging.info("Triggering initial DNS Sync...")
+        # We run it in a task so it doesn't block bot startup
+        asyncio.create_task(health_service.check_cluster())
     
     # Start Bot
     try:

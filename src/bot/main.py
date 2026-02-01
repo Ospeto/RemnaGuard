@@ -1020,19 +1020,21 @@ class TelegramBot:
             await wait_msg.edit_text(f"❌ **Sync Failed**: {e}")
 
     async def cmd_dns_status(self, message: types.Message):
-        """Show current DNS Config & Status."""
+        """Show current DNS Config & Status (Detailed)."""
         if not self.health_service.cf.enabled:
             await message.answer("⚠️ Cloudflare Service Disabled (Missing Token or Config)")
             return
             
-        msg = "🌐 <b>DNS Management Status (State-Based)</b>\n\n"
+        msg = "🌐 <b>DNS Cluster Synchronization</b>\n"
+        msg += f"<i>Mode: {'Fully Autonomous 🤖' if self.health_service.config.get('auto_mode') else 'Manual Approval 🛡️'}</i>\n\n"
         
         # Show configured domains
         config = self.health_service.cf.config
         domains = config.get("domains", [])
+        ip_states = self.health_service.ip_health_state
         
         if not domains:
-            msg += "⚠️ <i>No domains configured in config.yml. Run the setup wizard or check the file mount.</i>\n"
+            msg += "⚠️ <i>No domains configured in config.yml. Use /setup_dns.sh on host.</i>\n"
         else:
             for d in domains:
                 msg += f"<b>Domain</b>: {d.get('domain')}\n"
@@ -1040,17 +1042,21 @@ class TelegramBot:
                     z_name = z.get('name')
                     full = f"{z_name}.{d.get('domain')}" if z_name != "@" else d.get('domain')
                     ips = z.get('ips', [])
-                    msg += f"  • <b>{full}</b>: {len(ips)} IPs configured\n"
+                    
+                    msg += f"  • <b>{full}</b>:\n"
+                    # Category IPs for this zone
+                    for ip in ips:
+                        state = ip_states.get(ip, "UNKNOWN")
+                        indicator = "✅" if state == "HEALTHY" else "📡" if state == "OFFLINE" else "🚫" if state == "BLOCKED" else "❓"
+                        
+                        desc = "Healthy" if state == "HEALTHY" else \
+                               "Offline/Disconnected" if state == "OFFLINE" else \
+                               "Blocked by AI" if state == "BLOCKED" else \
+                               "IP Not Monitored (Add to Remnawave?)"
+                               
+                        msg += f"    {indicator} <code>{ip}</code> - {desc}\n"
+                msg += "\n"
                 
-        # Show specific bans (Incidents that are blocking IPs)
-        blocked_nodes = [name for name, inc in self.health_service.active_incidents.items() 
-                        if inc.state == "CONFIRMED"]
-        
-        if blocked_nodes:
-            msg += "\n🚫 <b>Active Blocks (Excluded from DNS)</b>:\n"
-            for n in blocked_nodes:
-                msg += f"  • {n} (Throttled/Unhealthy)\n"
-        else:
-            msg += "\n✅ All nodes are healthy & synced."
+        msg += "💡 <i>Run /dns_sync to force a manual rotation.</i>"
             
         await message.answer(msg, parse_mode="HTML")

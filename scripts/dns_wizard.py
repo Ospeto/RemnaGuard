@@ -25,6 +25,14 @@ CYAN = "\033[96m"
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
+def is_valid_ip(ip):
+    parts = ip.split('.')
+    if len(parts) != 4: return False
+    try:
+        return all(0 <= int(part) <= 255 for part in parts)
+    except ValueError:
+        return False
+
 def print_header():
     clear_screen()
     print(f"{BLUE}{BOLD}")
@@ -80,8 +88,13 @@ def manage_ips(current_ips):
         choice = input(f"{YELLOW}Select option: {RESET}")
         if choice == '1':
             new_ip = input_clean("Enter IP address")
-            if new_ip and new_ip not in ips:
-                ips.append(new_ip)
+            if new_ip:
+                if is_valid_ip(new_ip):
+                    if new_ip not in ips:
+                        ips.append(new_ip)
+                else:
+                    print(f"{RED}❌ Invalid IP format!{RESET}")
+                    time.sleep(1)
         elif choice == '2':
             to_remove = input_clean("Enter IP to remove")
             if to_remove in ips:

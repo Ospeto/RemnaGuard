@@ -162,6 +162,7 @@ class ClusterHealthService:
         self.node_history: Dict[str, NodeHistory] = {}
         self.node_states = defaultdict(lambda: {"last_total": 0})
         self.smart_thresholds: Dict[str, Dict] = {} # {node: {min_efficiency: float, min_speed: float}}
+        self.ip_health_state: Dict[str, str] = {}   # {ip: "HEALTHY"|"OFFLINE"|"BLOCKED"}
         
         # 3. Persistence Restores
         try:
@@ -395,6 +396,7 @@ class ClusterHealthService:
         2. Node is NOT in a confirmed 'Throttling/Blocking' incident.
         """
         healthy_ips = set()
+        self.ip_health_state = {} # Reset map
         
         for node in nodes:
             name = node.get("name")
@@ -403,15 +405,20 @@ class ClusterHealthService:
             
             # 1. Basic Health (Offline?)
             is_connected = node.get("isConnected", True)
-            if not is_connected: continue
+            status = node.get("status", "online")
+            is_online = is_connected and str(status).lower() != "offline"
+            
+            if not is_online:
+                self.ip_health_state[ip] = "OFFLINE"
+                continue
             
             # 2. Advanced Health (AI/Logic Incident?)
-            # Valid states: None, SUSPICIOUS, VERIFYING.
-            # Invalid states: CONFIRMED.
             incident = self.active_incidents.get(name)
             if incident and incident.state == Incident.STATE_CONFIRMED:
+                self.ip_health_state[ip] = "BLOCKED"
                 continue # Skip calling it healthy
                 
+            self.ip_health_state[ip] = "HEALTHY"
             healthy_ips.add(ip)
             
         # Execute Sync

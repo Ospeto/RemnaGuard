@@ -161,6 +161,10 @@ class CloudflareService:
                 existing_map = {r["content"]: r["id"] for r in existing_records}
                 existing_ips = set(existing_map.keys())
                 
+                # Log actual vs target state
+                if existing_ips != target_ips:
+                    logging.info(f"Syncing {record_name}: Actual IPs {existing_ips} -> Target IPs {target_ips}")
+                
                 # 2. Calculate Diff
                 to_add = target_ips - existing_ips
                 to_remove = existing_ips - target_ips
