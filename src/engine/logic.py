@@ -149,11 +149,20 @@ class ClusterHealthService:
         self.remnawave = remnawave_client
         self.api_client = remnawave_client # Alias used in some methods
         self.active_incidents: Dict[str, Incident] = {}
+        self.last_check = time.time()
         
-        # Cooldown Tracker: {node_name: end_time_timestamp}
+        # 1. Core Services
+        self.db = DatabaseService()
+        self.ai = AIService()
+        self.cf = CloudflareService()
+        
+        # 2. State & History
         self.dns_cooldowns: Dict[str, float] = {} 
+        self.recent_alerts = deque(maxlen=20)
+        self.node_history: Dict[str, NodeHistory] = {}
+        self.smart_thresholds: Dict[str, Dict] = {} # {node: {min_efficiency: float, min_speed: float}}
         
-        # Phase 14: Restore active bans from Database
+        # 3. Persistence Restores
         try:
              self.dns_cooldowns = self.db.get_all_active_bans()
              if self.dns_cooldowns:
@@ -161,23 +170,6 @@ class ClusterHealthService:
         except Exception as e:
              logging.error(f"Failed to restore DNS bans: {e}") 
         
-        # Recent Alerts (for /alerts command)
-        self.recent_alerts = deque(maxlen=20)
-        
-        # Node History (for trend analysis and /graph command)
-        self.node_history: Dict[str, NodeHistory] = {}
-        
-        # Database (for persistent storage)
-        self.db = DatabaseService()
-        
-        # AI Service & Smart Thresholds
-        self.ai = AIService()
-        self.smart_thresholds: Dict[str, Dict] = {} # {node: {min_efficiency: float, min_speed: float}}
-        
-        # Cloudflare Service
-        self.cf = CloudflareService()
-        
-        # Restore node history from database
         self._restore_node_history()
         
         # Load Config
