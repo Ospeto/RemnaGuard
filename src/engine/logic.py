@@ -5,8 +5,6 @@ import uuid
 from typing import Dict, List, Optional
 from collections import defaultdict, deque
 from ..services.remnawave import RemnawaveClient
-from ..services.database import DatabaseService
-from ..services.ai_analysis import AIService
 
 class Alert:
     def __init__(self, level: str, message: str, metadata: Dict = None):
@@ -155,6 +153,22 @@ class ClusterHealthService:
         # Recent Alerts (for /alerts command)
         self.recent_alerts = deque(maxlen=20)
         
+from ..services.database import DatabaseService
+from ..services.ai_analysis import AIService
+from ..services.cloudflare import CloudflareService
+
+class ClusterHealthService:
+    def __init__(self, remnawave_client, config: Dict):
+        self.remnawave = remnawave_client
+        self.config = config
+        self.active_incidents: Dict[str, Incident] = {}
+        
+        # Cooldown Tracker: {node_name: end_time_timestamp}
+        self.dns_cooldowns: Dict[str, float] = {} 
+        
+        # Recent Alerts (for /alerts command)
+        self.recent_alerts = deque(maxlen=20)
+        
         # Node History (for trend analysis and /graph command)
         self.node_history: Dict[str, NodeHistory] = {}
         
@@ -164,6 +178,9 @@ class ClusterHealthService:
         # AI Service & Smart Thresholds
         self.ai = AIService()
         self.smart_thresholds: Dict[str, Dict] = {} # {node: {min_efficiency: float, min_speed: float}}
+        
+        # Cloudflare Service
+        self.cf = CloudflareService()
         
         # Restore node history from database
         self._restore_node_history()
@@ -483,12 +500,61 @@ class ClusterHealthService:
                 incident.state = Incident.STATE_VERIFYING
                 logging.info(f"LogicV2: Escalating {name} to VERIFYING")
                 
-        elif incident.state == Incident.STATE_VERIFYING:
             # If it persists for Y seconds, ALERT.
             if duration > self.VERIFY_DURATION:
-                # Direct alert (Smart Thresholds already applied in detection step)
-                incident.state = Incident.STATE_CONFIRMED
-                self._trigger_alert(incident, alerts)
+                # AI Verification
+                history = list(self.node_history.get(incident.node_name, NodeHistory(incident.node_name)).samples)
+                
+                # Get negative examples
+                neg_examples = self.db.get_negative_examples()
+                
+                verdict = await self.ai.verify_incident(incident.node_name, {"speed": 0, "users": incident.max_users}, history, neg_examples)
+                
+                if verdict == "CONFIRMED":
+                    incident.state = Incident.STATE_CONFIRMED
+                    self._trigger_alert(incident, alerts)
+                    
+                    # --- PHASE 12: DNS MITIGATION & COOLDOWN ---
+                    if self.cf.enabled:
+                         logging.info(f"Removing DNS for {incident.node_name} (Throttling Confirmed)")
+                         if await self.cf.delete_record(incident.node_name):
+                             # Set Cooldown: Now + 60 mins
+                             self.dns_cooldowns[incident.node_name] = time.time() + 3600
+                             self._trigger_alert(Alert("INFO", f"🚫 Node {incident.node_name} removed from DNS (Cooldown 1h)"), alerts)
+                    # -------------------------------------------
+                    
+                elif verdict == "IGNORE":
+                     incident.state = Incident.STATE_RESOLVED
+                     incident.status = "False Positive (AI)"
+                     self.active_incidents.pop(name)
+                     self.db.save_incident(incident.__dict__)
+
+        elif incident.state == Incident.STATE_CONFIRMED:
+            # Still failing...
+            # --- PHASE 12: COOLDOWN EXPIRY & TRIAL ---
+            cooldown_end = self.dns_cooldowns.get(name, 0)
+            if cooldown_end > 0 and time.time() > cooldown_end:
+                 # Cooldown passed. Re-add DNS for TRIAL.
+                 logging.info(f"Cooldown expired for {name}. RESTORING DNS.")
+                 
+                 # Try to fetch node IP from Remnawave
+                 try:
+                     nodes = await self.remnawave.get_nodes()
+                     node_info = next((n for n in nodes if n.get("name") == name), None)
+                     
+                     ip = None
+                     if node_info:
+                         # Try typical fields
+                         ip = node_info.get("address") or node_info.get("ip")
+                         
+                     if ip and await self.cf.update_record(name, ip):
+                         # Restored!
+                         del self.dns_cooldowns[name]
+                         self._trigger_alert(Alert("INFO", f"✅ Node {name} DNS restored (Probation Trial)"), alerts)
+                     else:
+                         logging.warning(f"Could not restore DNS for {name}: IP not found or API failed.")
+                 except Exception as e:
+                     logging.error(f"Failed to restore DNS: {e}")
                 
         # B3. Re-Alert logic for Confirmed?
         # If confirmed, we already alerted. Maybe remind every hour?

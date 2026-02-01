@@ -53,6 +53,7 @@ class TelegramBot:
         self.dp.message.register(self.cmd_analyze, Command("analyze"))
         self.dp.message.register(self.cmd_ai_model, Command("ai_model"))
         self.dp.message.register(self.cmd_export, Command("export"))
+        self.dp.message.register(self.cmd_dns_status, Command("dns_status"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
@@ -898,4 +899,41 @@ class TelegramBot:
             
         except Exception as e:
             logging.error(f"Feedback callback failed: {e}")
+            await callback.answer(f"Thanks! Feedback recorded: {rating}")
+            
+            # Remove buttons to prevent double voting
+            await callback.message.edit_reply_markup(reply_markup=None)
+            
+        except Exception as e:
+            logging.error(f"Feedback callback failed: {e}")
             await callback.answer("❌ Error recording feedback.")
+
+    async def cmd_dns_status(self, message: types.Message):
+        """Show current DNS Cooldowns and Mappings."""
+        cooldowns = self.health_service.dns_cooldowns
+        
+        msg = "🌐 <b>DNS Management Status</b>\n\n"
+        
+        # 1. Cooldowns
+        if cooldowns:
+            msg += "<b>⏳ Active Cooldowns (Probation)</b>:\n"
+            now = time.time()
+            for node, end_time in cooldowns.items():
+                remaining = int((end_time - now) / 60)
+                if remaining > 0:
+                    msg += f"❌ <b>{node}</b>: Re-enabling in {remaining} mins\n"
+                else:
+                    msg += f"♻️ <b>{node}</b>: Retrying anytime now...\n"
+        else:
+            msg += "✅ All monitored nodes are Healthy (No Cooldowns)\n"
+            
+        # 2. Config
+        msg += "\n<b>⚙️ Configured Mappings:</b>\n"
+        if self.health_service.cf.enabled:
+            mappings = self.health_service.cf.mappings
+            for node, conf in mappings.items():
+                 msg += f"• {node} → <code>{conf.get('domain')}</code>\n"
+        else:
+             msg += "⚠️ Cloudflare Service Disabled (Missing Token or Mappings)"
+             
+        await message.answer(msg, parse_mode="HTML")

@@ -1,0 +1,11 @@
+{
+    "_comment": "Map Node Names (from Panel) to DNS Records. Set 'proxied': true for Orange Cloud.",
+    "US-Node-1": {
+        "domain": "us1.yourdomain.com",
+        "proxied": false
+    },
+    "DE-Node-1": {
+        "domain": "de1.yourdomain.com",
+        "proxied": false
+    }
+}
