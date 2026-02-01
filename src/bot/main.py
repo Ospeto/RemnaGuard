@@ -54,6 +54,7 @@ class TelegramBot:
         self.dp.message.register(self.cmd_ai_model, Command("ai_model"))
         self.dp.message.register(self.cmd_export, Command("export"))
         self.dp.message.register(self.cmd_dns_status, Command("dns_status"))
+        self.dp.message.register(self.cmd_dns_status, Command("dns"))
         self.dp.message.register(self.cmd_dns_sync, Command("dns_sync"))
         self.dp.message.register(self.cmd_dns_sync, Command("dns_rotate"))
         
@@ -799,7 +800,7 @@ class TelegramBot:
         analysis = await self.health_service.ai.analyze_node(node_name, history_data, neg_examples)
         
         # Format response
-        msg = f"🧠 <b>AI Analysis: {node_name}</b>\n\n{analysis}"
+        msg = f"🧠 **AI Analysis: {node_name}**\n\n{analysis}"
         
         # Add feedback buttons
         # format: feedback:rating:node_name (truncate verdict since it's in msg)
@@ -1030,13 +1031,16 @@ class TelegramBot:
         config = self.health_service.cf.config
         domains = config.get("domains", [])
         
-        for d in domains:
-            msg += f"<b>Domain</b>: {d.get('domain')}\n"
-            for z in d.get("zones", []):
-                z_name = z.get('name')
-                full = f"{z_name}.{d.get('domain')}" if z_name != "@" else d.get('domain')
-                ips = z.get('ips', [])
-                msg += f"  • <b>{full}</b>: {len(ips)} IPs configured\n"
+        if not domains:
+            msg += "⚠️ <i>No domains configured in config.yml. Run the setup wizard or check the file mount.</i>\n"
+        else:
+            for d in domains:
+                msg += f"<b>Domain</b>: {d.get('domain')}\n"
+                for z in d.get("zones", []):
+                    z_name = z.get('name')
+                    full = f"{z_name}.{d.get('domain')}" if z_name != "@" else d.get('domain')
+                    ips = z.get('ips', [])
+                    msg += f"  • <b>{full}</b>: {len(ips)} IPs configured\n"
                 
         # Show specific bans (Incidents that are blocking IPs)
         blocked_nodes = [name for name, inc in self.health_service.active_incidents.items() 
