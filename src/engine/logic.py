@@ -160,6 +160,7 @@ class ClusterHealthService:
         self.dns_cooldowns: Dict[str, float] = {} 
         self.recent_alerts = deque(maxlen=20)
         self.node_history: Dict[str, NodeHistory] = {}
+        self.node_states = defaultdict(lambda: {"last_total": 0})
         self.smart_thresholds: Dict[str, Dict] = {} # {node: {min_efficiency: float, min_speed: float}}
         
         # 3. Persistence Restores

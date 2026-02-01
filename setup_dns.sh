@@ -39,6 +39,16 @@ if ! pip show PyYAML &> /dev/null; then
     pip install PyYAML > /dev/null
 fi
 
+# Check for credentials in .env
+if [ -f ".env" ]; then
+    if ! grep -q "CLOUDFLARE_API_TOKEN" .env; then
+        echo "⚠️  Warning: CLOUDFLARE_API_TOKEN not found in .env"
+        echo "   The Cloudflare sync will be disabled until you add it."
+    fi
+else
+    echo "⚠️  Warning: .env file missing. Run install.sh first or create it."
+fi
+
 echo "✅ Environment OK."
 echo "Starting Wizard..."
 sleep 1

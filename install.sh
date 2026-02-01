@@ -108,18 +108,21 @@ if [ -f .env ]; then
         echo ">>> Skipping core configuration..."
         source .env
         
-        # Check if Gemini Key is missing in existing env (for upgrade path)
+        # Check for Gemini Key
         if [ -z "$GEMINI_API_KEY" ]; then
-             echo "----------------------------------------"
-             echo "🤖 AI Integration (Gemini)"
-             echo "----------------------------------------"
-             echo "To enable Smart Baselines and Anti-False-Positive verification,"
-             echo "you need a Google Gemini API Key."
-             read_input "Gemini API Key (Leave blank to disableAI)" "" "GEMINI_API_KEY" "true"
-             
+             echo "🤖 AI Integration (Gemini) missing. Adding..."
+             read_input "Gemini API Key" "" "GEMINI_API_KEY" "true"
              if [ -n "$GEMINI_API_KEY" ]; then
                  echo "GEMINI_API_KEY=$GEMINI_API_KEY" >> .env
-                 echo ">>> Added Gemini Key to existing configuration."
+             fi
+        fi
+
+        # Check for Cloudflare Token
+        if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+             echo "🌐 Cloudflare DNS Integration missing. Adding..."
+             read_input "Cloudflare API Token" "" "CLOUDFLARE_API_TOKEN" "true"
+             if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+                 echo "CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN" >> .env
              fi
         fi
         
@@ -141,6 +144,11 @@ echo "🤖 AI Integration (Gemini)"
 echo "----------------------------------------"
 read_input "Gemini API Key (Leave blank to disable AI)" "${GEMINI_API_KEY}" "INPUT_GEMINI_KEY" "true"
 
+echo "----------------------------------------"
+echo "🌐 Cloudflare DNS Integration"
+echo "----------------------------------------"
+read_input "Cloudflare API Token (Leave blank to disable DNS)" "${CLOUDFLARE_API_TOKEN}" "INPUT_CF_TOKEN" "true"
+
 echo ">>> Generating .env file..."
 
 # Generating .env
@@ -155,6 +163,7 @@ REMNAWAVE_TOKEN=$INPUT_TOKEN
 TELEGRAM_BOT_TOKEN=$INPUT_BOT_TOKEN
 ADMIN_IDS=$INPUT_ADMINS
 GEMINI_API_KEY=$INPUT_GEMINI_KEY
+CLOUDFLARE_API_TOKEN=$INPUT_CF_TOKEN
 
 # Config
 LOG_LEVEL=INFO

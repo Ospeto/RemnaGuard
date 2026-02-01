@@ -10,6 +10,7 @@ services:
       - MONITOR_MODE=api-central
     volumes:
       - remnaguard_data:/app/data
+      - ./config.yml:/app/config.yml:ro
 
 volumes:
   remnaguard_data:

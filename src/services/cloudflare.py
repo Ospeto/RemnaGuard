@@ -20,10 +20,11 @@ class CloudflareService:
         self.zone_cache = {} # {domain: zone_id}
         
         if self.enabled:
-            logging.info("Cloudflare Service initialized (State-Based).")
             self.config = self._load_config()
+            domain_count = len(self.config.get("domains", []))
+            logging.info(f"✅ Cloudflare Service initialized. Loaded {domain_count} domains from {config_path}.")
         else:
-            logging.warning("Cloudflare Service disabled (Missing token or config.yml).")
+            logging.warning("⚠️ Cloudflare Service disabled (Missing CLOUDFLARE_API_TOKEN or config.yml).")
             self.config = {}
 
     def _load_config(self) -> Dict:
