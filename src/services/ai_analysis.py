@@ -47,7 +47,7 @@ class AIService:
             logging.error(f"Failed to switch model to {model_name}: {e}")
             return False
 
-    async def verify_incident(self, node_name: str, metrics: Dict, history: List[Dict]) -> str:
+    async def verify_incident(self, node_name: str, metrics: Dict, history: List[Dict], negative_examples: List[Dict] = []) -> str:
         """
         Ask AI to verify if a suspicious event is a real anomaly.
         Returns: 'CONFIRMED', 'IGNORE', or 'UNCERTAIN'.
@@ -59,6 +59,13 @@ class AIService:
             # Construct context
             history_summary = self._summarize_history(history)
             
+            # Construct Negative Constraints
+            constraints = ""
+            if negative_examples:
+                constraints = "\n\n⚠️ AVOID THESE PREVIOUS MISTAKES (User marked them WRONG):\n"
+                for ex in negative_examples:
+                    constraints += f"- Context: {ex.get('context_summary')}\n  Your Verdict was: {ex.get('ai_verdict')}\n  (Do NOT repeat this verdict for similar patterns)\n"
+
             prompt = f"""
             You are a network monitoring AI. Analyze this potential incident.
             
@@ -70,6 +77,7 @@ class AIService:
             
             Recent History (Last 6 hours):
             {history_summary}
+            {constraints}
             
             Task:
             Verification: Is this a real performance anomaly or GFW blocking event?
@@ -148,9 +156,10 @@ class AIService:
             logging.error(f"AI Batch Analysis failed: {e}")
             return {}
 
-    async def analyze_node(self, node_name: str, history: List[Dict]) -> str:
+    async def analyze_node(self, node_name: str, history: List[Dict], negative_examples: List[Dict] = []) -> str:
         """
         Generate a natural language analysis of node performance.
+        Now includes 'negative_examples' to avoid repeating past mistakes.
         """
         if not self.enabled:
             return "⚠️ AI service is not enabled. Please set GEMINI_API_KEY."
@@ -158,11 +167,19 @@ class AIService:
         try:
             history_summary = self._summarize_history(history)
             
+            # Construct Negative Constraints
+            constraints = ""
+            if negative_examples:
+                constraints = "\n\n⚠️ AVOID THESE PREVIOUS MISTAKES:\n"
+                for ex in negative_examples:
+                    constraints += f"- Context: {ex.get('context_summary')}\n  BAD Verdict: {ex.get('ai_verdict')}\n"
+            
             prompt = f"""
             Analyze the performance of node '{node_name}' based on its recent history.
             
             Data (Last 24h samples):
             {history_summary}
+            {constraints}
             
             Identify:
             1. Determining Trend (improving/degrading)

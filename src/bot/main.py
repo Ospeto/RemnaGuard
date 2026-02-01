@@ -52,12 +52,14 @@ class TelegramBot:
         self.dp.message.register(self.cmd_digest, Command("digest"))
         self.dp.message.register(self.cmd_analyze, Command("analyze"))
         self.dp.message.register(self.cmd_ai_model, Command("ai_model"))
+        self.dp.message.register(self.cmd_export, Command("export"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
         self.dp.callback_query.register(self.process_menu_callback, lambda c: c.data and c.data.startswith("menu_"))
         self.dp.callback_query.register(self.process_node_callback, lambda c: c.data and c.data.startswith("node_"))
         self.dp.callback_query.register(self.process_model_callback, lambda c: c.data and c.data.startswith("model_"))
+        self.dp.callback_query.register(self.process_feedback_callback, lambda c: c.data and c.data.startswith("ai_fb:"))
 
     async def start(self):
         await self.dp.start_polling(self.bot)
@@ -154,6 +156,9 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton(text="⚙️ Config", callback_data="menu_config"),
+                InlineKeyboardButton(text="🧠 AI", callback_data="menu_ai_model")
+            ],
+            [
                 InlineKeyboardButton(text="❓ Help", callback_data="menu_help")
             ]
         ])
@@ -174,13 +179,17 @@ class TelegramBot:
             "/top - Top Nodes by Load\n"
             "/graph - 6-Hour Efficiency Chart\n"
             "/node &lt;name&gt; - Deep Dive Stats\n\n"
+            "<b>🧠 AI Insights</b>\n"
+            "/analyze &lt;name&gt; - AI Performance Analysis\n"
+            "/ai_model - Switch Gemini Models\n\n"
             "<b>📈 Analytics</b>\n"
             "/uptime - 7-Day Uptime Stats\n"
             "/digest - Today's Summary\n"
             "/alerts - Recent Alerts\n"
             "/reports - Silent Incidents\n\n"
             "<b>⚙️ Configuration</b>\n"
-            "/config - View/Edit Thresholds\n\n"
+            "/config - View/Edit Thresholds\n"
+            "/export - Download Database Backup\n\n"
             "<i>Tip: Use /start for button menu!</i>"
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -637,6 +646,10 @@ class TelegramBot:
             ])
             await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
         
+        elif action == "ai_model":
+            await self.cmd_ai_model(callback.message)
+            return
+
         await callback.answer()
 
     async def process_node_callback(self, callback: types.CallbackQuery):
@@ -760,13 +773,27 @@ class TelegramBot:
         # Get history as list of dicts
         history_data = list(history.samples)[-50:] # Last 50 samples
         
-        # Call AI
-        analysis = await self.health_service.ai.analyze_node(node_name, history_data)
+        # Call AI with negative examples
+        neg_examples = self.health_service.db.get_negative_examples()
+        analysis = await self.health_service.ai.analyze_node(node_name, history_data, neg_examples)
         
         # Format response
         msg = f"🧠 <b>AI Analysis: {node_name}</b>\n\n{analysis}"
         
-        await processing_msg.edit_text(msg, parse_mode="Markdown")
+        # Add feedback buttons
+        # format: feedback:rating:node_name (truncate verdict since it's in msg)
+        # We need a way to store context. For now, we'll store basic context in callback data
+        # actually, callback data is limited to 64 bytes. We will use a temporary cache or just simple rating.
+        # Let's simple rating: feedback:ACCURATE:node_name or feedback:WRONG:node_name
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👍 Accurate", callback_data=f"ai_fb:ACCURATE:{node_name}"),
+                InlineKeyboardButton(text="👎 Wrong", callback_data=f"ai_fb:WRONG:{node_name}")
+            ]
+        ])
+        
+        await processing_msg.edit_text(msg, parse_mode="Markdown", reply_markup=keyboard)
 
     async def cmd_ai_model(self, message: types.Message):
         """Show menu to switch AI models."""
@@ -819,3 +846,56 @@ class TelegramBot:
              await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
         else:
              await callback.answer(f"Failed to switch to {model_id}.", show_alert=True)
+
+    async def cmd_export(self, message: types.Message):
+        """Export the SQLite database."""
+        db_path = self.health_service.db.db_path
+        if not os.path.exists(db_path):
+            await message.answer("❌ Database file not found.")
+            return
+            
+        await message.answer("📦 Exporting database...")
+        try:
+            file = types.FSInputFile(db_path, filename="remnaguard_backup.db")
+            await message.answer_document(file, caption=f"📦 <b>Database Backup</b>\n📅 {self.health_service.db._get_timestamp()}")
+        except Exception as e:
+            logging.error(f"Export failed: {e}")
+            await message.answer(f"❌ Export failed: {e}")
+
+    async def process_feedback_callback(self, callback: types.CallbackQuery):
+        """Handle AI feedback."""
+        # data: ai_fb:RATING:node_name
+        try:
+            _, rating, node_name = callback.data.split(":", 2)
+            
+            # We need the context and verdict from the message text to learn from it.
+            # Message text format: "🧠 AI Analysis: {node_name}\n\n{analysis}"
+            full_text = callback.message.text or callback.message.caption or ""
+            
+            # Extract analysis (verdict/content)
+            # Remove the header
+            if "\n\n" in full_text:
+                verdict = full_text.split("\n\n", 1)[1]
+            else:
+                verdict = full_text
+            
+            # Get Context (Recent History Summary)
+            # This is expensive to re-fetch, but necessary to save "what was happening" 
+            # so we can show it as a negative example later.
+            history = self.health_service.get_node_history(node_name)
+            if history:
+                 context_summary = self.health_service.ai._summarize_history(list(history.samples)[-20:]) # Short context
+            else:
+                 context_summary = "No context available"
+            
+            # Save to DB
+            self.health_service.db.save_feedback(node_name, context_summary, verdict, rating)
+            
+            await callback.answer(f"Thanks! Feedback recorded: {rating}")
+            
+            # Remove buttons to prevent double voting
+            await callback.message.edit_reply_markup(reply_markup=None)
+            
+        except Exception as e:
+            logging.error(f"Feedback callback failed: {e}")
+            await callback.answer("❌ Error recording feedback.")

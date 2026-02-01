@@ -63,6 +63,18 @@ class DatabaseService:
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_status_node ON node_status_log(node)')
+
+            # AI Feedback Table (Phase 11)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ai_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_name TEXT,
+                    context_summary TEXT,
+                    ai_verdict TEXT,
+                    user_rating TEXT, -- ACCURATE or WRONG
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
             # Daily stats (for digest reports)
             cursor.execute('''
@@ -296,3 +308,29 @@ class DatabaseService:
                 "peak_node": peak_node,
                 "avg_efficiency": round(avg_eff, 2)
             }
+
+    # === AI FEEDBACK ===
+
+    def save_feedback(self, node_name: str, context: str, verdict: str, rating: str):
+        """Save user feedback on AI analysis."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO ai_feedback (node_name, context_summary, ai_verdict, user_rating)
+                VALUES (?, ?, ?, ?)
+            ''', (node_name, context, verdict, rating))
+            conn.commit()
+            
+    def get_negative_examples(self, limit: int = 3) -> List[Dict]:
+        """Get recent examples where AI was marked WRONG."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT node_name, context_summary, ai_verdict
+                FROM ai_feedback
+                WHERE user_rating = 'WRONG'
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (limit,))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
