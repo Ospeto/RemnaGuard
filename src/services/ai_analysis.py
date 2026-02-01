@@ -7,21 +7,45 @@ from typing import Dict, List, Optional
 class AIService:
     """Service for AI-powered analysis using Gemini."""
     
+    AVAILABLE_MODELS = {
+        "gemini-3-pro-preview": "Gemini 3.0 Pro (Preview)",
+        "gemini-3-flash-preview": "Gemini 3.0 Flash (Preview)",
+        "gemini-2.5-flash": "Gemini 2.5 Flash",
+        "gemini-pro": "Gemini 1.0 Pro (Legacy)"
+    }
+
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY")
         self.model = None
         self.enabled = False
+        self.current_model_name = "gemini-pro" # Default
         
+        if os.getenv("GEMINI_MODEL"):
+            self.current_model_name = os.getenv("GEMINI_MODEL")
+
         if self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel('gemini-pro')
+                self.model = genai.GenerativeModel(self.current_model_name)
                 self.enabled = True
-                logging.info("Gemini AI integration enabled.")
+                logging.info(f"Gemini AI integration enabled. Model: {self.current_model_name}")
             except Exception as e:
                 logging.error(f"Failed to initialize Gemini AI: {e}")
         else:
             logging.info("GEMINI_API_KEY not set. AI features disabled.")
+            
+    def set_model(self, model_name: str) -> bool:
+        """Switch the active AI model."""
+        if model_name not in self.AVAILABLE_MODELS and model_name != "gemini-pro":
+            return False
+            
+        try:
+            self.model = genai.GenerativeModel(model_name)
+            self.current_model_name = model_name
+            return True
+        except Exception as e:
+            logging.error(f"Failed to switch model to {model_name}: {e}")
+            return False
 
     async def verify_incident(self, node_name: str, metrics: Dict, history: List[Dict]) -> str:
         """

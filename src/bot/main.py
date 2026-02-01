@@ -51,11 +51,13 @@ class TelegramBot:
         self.dp.message.register(self.cmd_uptime, Command("uptime"))
         self.dp.message.register(self.cmd_digest, Command("digest"))
         self.dp.message.register(self.cmd_analyze, Command("analyze"))
+        self.dp.message.register(self.cmd_ai_model, Command("ai_model"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
         self.dp.callback_query.register(self.process_menu_callback, lambda c: c.data and c.data.startswith("menu_"))
         self.dp.callback_query.register(self.process_node_callback, lambda c: c.data and c.data.startswith("node_"))
+        self.dp.callback_query.register(self.process_model_callback, lambda c: c.data and c.data.startswith("model_"))
 
     async def start(self):
         await self.dp.start_polling(self.bot)
@@ -766,3 +768,23 @@ class TelegramBot:
         
         await processing_msg.edit_text(msg, parse_mode="Markdown")
 
+    async def cmd_ai_model(self, message: types.Message):
+        """Show menu to switch AI models."""
+        current_model = self.health_service.ai.current_model_name
+        
+        msg = (
+            f"🧠 <b>Gemini Model Selector</b>\n\n"
+            f"Current Model: <code>{current_model}</code>\n\n"
+            "Select a model to switch:"
+        )
+        
+        # Build keyboard from available models in AIService
+        buttons = []
+        for model_id, model_name in self.health_service.ai.AVAILABLE_MODELS.items():
+            prefix = "✅ " if model_id == current_model else ""
+            buttons.append([InlineKeyboardButton(text=f"{prefix}{model_name}", callback_data=f"model_{model_id}")])
+            
+        buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="model_cancel")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        await message.answer(msg, parse_mode="HTML", reply_markup=keyboard)
