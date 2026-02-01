@@ -48,6 +48,8 @@ class TelegramBot:
         self.dp.message.register(self.cmd_top, Command("top"))
         self.dp.message.register(self.cmd_graph, Command("graph"))
         self.dp.message.register(self.cmd_node, Command("node"))
+        self.dp.message.register(self.cmd_uptime, Command("uptime"))
+        self.dp.message.register(self.cmd_digest, Command("digest"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
@@ -144,8 +146,8 @@ class TelegramBot:
                 InlineKeyboardButton(text="🔝 Top", callback_data="menu_top")
             ],
             [
-                InlineKeyboardButton(text="🚨 Alerts", callback_data="menu_alerts"),
-                InlineKeyboardButton(text="📋 Reports", callback_data="menu_reports")
+                InlineKeyboardButton(text="📉 Uptime", callback_data="menu_uptime"),
+                InlineKeyboardButton(text="📊 Digest", callback_data="menu_digest")
             ],
             [
                 InlineKeyboardButton(text="⚙️ Config", callback_data="menu_config"),
@@ -163,19 +165,25 @@ class TelegramBot:
     async def cmd_help(self, message: types.Message):
         help_text = (
             "🛡️ <b>RemnaGuard Help</b>\n\n"
-            "<b>Monitoring</b>\n"
+            "<b>📊 Monitoring</b>\n"
             "/status - System & API Health\n"
             "/nodes - Node List & Bandwidth\n"
             "/top - Top Nodes by Load\n"
-            "/alerts - Recent History\n"
-            "/reports - Silent Incidents\n"
             "/graph - 6-Hour Efficiency Chart\n"
             "/node &lt;name&gt; - Deep Dive Stats\n\n"
-            "<b>Configuration</b>\n"
-            "/config - View/Edit Thresholds\n"
-            "<i>(Usage: /config set users 5)</i>"
+            "<b>📈 Analytics</b>\n"
+            "/uptime - 7-Day Uptime Stats\n"
+            "/digest - Today's Summary\n"
+            "/alerts - Recent Alerts\n"
+            "/reports - Silent Incidents\n\n"
+            "<b>⚙️ Configuration</b>\n"
+            "/config - View/Edit Thresholds\n\n"
+            "<i>Tip: Use /start for button menu!</i>"
         )
-        await message.answer(help_text, parse_mode="HTML")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+        ])
+        await message.answer(help_text, parse_mode="HTML", reply_markup=keyboard)
 
     async def cmd_nodes(self, message: types.Message):
         """Fetch and display all nodes."""
@@ -572,15 +580,56 @@ class TelegramBot:
         elif action == "help":
             msg = (
                 "🛡️ <b>RemnaGuard Help</b>\n\n"
-                "<b>📊 Status</b> - System & API Health\n"
-                "<b>🖥️ Nodes</b> - Select individual nodes\n"
-                "<b>📈 Graph</b> - 6-Hour efficiency sparklines\n"
-                "<b>🔝 Top</b> - Busiest nodes\n"
-                "<b>🚨 Alerts</b> - Recent alert history\n"
-                "<b>📋 Reports</b> - Silent incidents\n"
-                "<b>⚙️ Config</b> - View/edit thresholds"
+                "<b>📊 Monitoring</b>\n"
+                "<b>Status</b> - System & API Health\n"
+                "<b>Nodes</b> - Node List & Bandwidth\n"
+                "<b>Top</b> - Busiest nodes\n"
+                "<b>Graph</b> - 6-Hour efficiency sparklines\n\n"
+                "<b>📈 Analytics</b>\n"
+                "<b>Uptime</b> - 7-Day Stats\n"
+                "<b>Digest</b> - Today's Summary\n"
+                "<b>Alerts</b> - Recent Alerts\n"
+                "<b>Reports</b> - Silent Incidents\n\n"
+                "<b>⚙️ Configuration</b>\n"
+                "<b>Config</b> - View/Edit Thresholds"
             )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+        
+        elif action == "uptime":
+            uptimes = self.health_service.db.get_all_uptimes(days=7)
+            
+            if not uptimes:
+                msg = "⏳ No uptime data yet. Check back after nodes have been tracked for a while."
+            else:
+                msg = "📈 <b>7-Day Uptime</b>\n\n"
+                for node, uptime in sorted(uptimes.items(), key=lambda x: x[1], reverse=True):
+                    if uptime >= 99:
+                        emoji = "🟢"
+                    elif uptime >= 95:
+                        emoji = "🟡"
+                    else:
+                        emoji = "🔴"
+                    msg += f"{emoji} <b>{node}</b>: {uptime:.2f}%\n"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu_uptime")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+        
+        elif action == "digest":
+            stats = self.health_service.db.get_today_stats()
+            msg = (
+                "📊 <b>Today's Digest</b>\n\n"
+                f"🚨 <b>Incidents</b>: {stats['incidents']}\n"
+                f"👥 <b>Peak Users</b>: {stats['peak_users']} (<b>{stats['peak_node']}</b>)\n"
+                f"⚡ <b>Avg Efficiency</b>: {stats['avg_efficiency']:.2f} KB/s/user\n"
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu_digest")],
                 [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
             ])
             await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
@@ -638,3 +687,48 @@ class TelegramBot:
         
         await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
         await callback.answer()
+
+    # === NEW COMMANDS ===
+    
+    async def cmd_uptime(self, message: types.Message):
+        """Show 7-day uptime for all nodes."""
+        uptimes = self.health_service.db.get_all_uptimes(days=7)
+        
+        if not uptimes:
+            await message.answer("⏳ No uptime data yet. Check back after nodes have been tracked for a while.")
+            return
+        
+        msg = "📈 <b>7-Day Uptime</b>\n\n"
+        for node, uptime in sorted(uptimes.items(), key=lambda x: x[1], reverse=True):
+            # Color based on uptime
+            if uptime >= 99:
+                emoji = "🟢"
+            elif uptime >= 95:
+                emoji = "🟡"
+            else:
+                emoji = "🔴"
+            msg += f"{emoji} <b>{node}</b>: {uptime:.2f}%\n"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu_uptime")],
+            [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+        ])
+        await message.answer(msg, parse_mode="HTML", reply_markup=keyboard)
+    
+    async def cmd_digest(self, message: types.Message):
+        """Show today's digest summary."""
+        stats = self.health_service.db.get_today_stats()
+        
+        msg = (
+            "📊 <b>Today's Digest</b>\n\n"
+            f"🚨 <b>Incidents</b>: {stats['incidents']}\n"
+            f"👥 <b>Peak Users</b>: {stats['peak_users']} (<b>{stats['peak_node']}</b>)\n"
+            f"⚡ <b>Avg Efficiency</b>: {stats['avg_efficiency']:.2f} KB/s/user\n"
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu_digest")],
+            [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu_main")]
+        ])
+        await message.answer(msg, parse_mode="HTML", reply_markup=keyboard)
+

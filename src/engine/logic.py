@@ -166,6 +166,9 @@ class ClusterHealthService:
         # Database (for persistent storage)
         self.db = DatabaseService()
         
+        # Restore node history from database
+        self._restore_node_history()
+        
         # Load Config
         self.config = {
             "min_users": int(os.getenv("THROTTLE_MIN_USERS", "3")),
@@ -207,6 +210,29 @@ class ClusterHealthService:
     def get_all_node_names(self) -> List[str]:
         """Return list of all tracked node names."""
         return list(self.node_history.keys())
+    
+    def _restore_node_history(self):
+        """Restore node history from database on startup."""
+        try:
+            tracked_nodes = self.db.get_all_tracked_nodes()
+            for node_name in tracked_nodes:
+                samples = self.db.get_recent_samples(node_name, hours=6)
+                if samples:
+                    history = NodeHistory(node_name)
+                    for s in samples:
+                        history.samples.append({
+                            "ts": time.time(),  # Approximate (lost precision, but good enough for trend)
+                            "speed": s["speed"],
+                            "users": s["users"],
+                            "eff": s["eff"]
+                        })
+                    self.node_history[node_name] = history
+                    logging.info(f"Restored {len(samples)} samples for {node_name}")
+            
+            # Cleanup very old samples on startup (keep 90 days for AI analysis)
+            self.db.cleanup_old_samples(days=90)
+        except Exception as e:
+            logging.warning(f"Could not restore node history: {e}")
 
     async def check_cluster(self) -> List[Alert]:
         alerts = []
@@ -237,13 +263,25 @@ class ClusterHealthService:
     async def _process_node(self, node: Dict, elapsed: float, alerts: List[Alert]):
         name = node.get("name", "Unknown")
         
-        # 1. Skip Offline
+        # 1. Track Online/Offline Status for Uptime
         is_connected = node.get("isConnected", True)
         status = node.get("status", "online")
-        if not is_connected or str(status).lower() == "offline":
-             # If node goes offline while having an incident, maybe close it?
-             # For now, let's keep it open until it comes back or timeout.
-             return
+        is_online = is_connected and str(status).lower() != "offline"
+        
+        # Track status transitions
+        last_status = self.node_states[name].get("last_status", None)
+        if last_status is None:
+            # First time seeing this node
+            self.node_states[name]["last_status"] = is_online
+            self.db.log_node_status(name, "online" if is_online else "offline")
+        elif last_status != is_online:
+            # Status changed
+            self.db.log_node_status(name, "online" if is_online else "offline")
+            self.node_states[name]["last_status"] = is_online
+            
+        if not is_online:
+            # Node is offline - skip processing but track it
+            return
 
         # 2. Calculate Metrics
         total_bytes = int(node.get("trafficUsedBytes") or 0)
@@ -286,9 +324,17 @@ class ClusterHealthService:
         
         # 4. Record Sample to History (ALWAYS - even on startup for node discovery)
         efficiency = smoothed_velocity / users if users > 0 else 0.0
+        hour = int(time.strftime("%H"))
+        
         if name not in self.node_history:
             self.node_history[name] = NodeHistory(name)
         self.node_history[name].add_sample(smoothed_velocity, users, efficiency)
+        
+        # 5. Persist to database for AI analysis
+        try:
+            self.db.save_sample(name, smoothed_velocity, users, efficiency, hour)
+        except Exception as e:
+            logging.warning(f"Failed to save sample: {e}")
         
         # 5. Detection Logic (Skip on startup to avoid false positives)
         if is_startup:
@@ -326,6 +372,18 @@ class ClusterHealthService:
             if users >= self.FAST_TRACK_USERS and speed < self.FAST_TRACK_SPEED:
                 is_bad = True
                 issue_type = "GHOST_THROTTLE" # GFW signature
+            
+            # Rule 3: ANOMALY Detection (Significant deviation from historical baseline)
+            # Only if we have enough history for this node
+            if name in self.node_history:
+                hist = self.node_history[name]
+                baseline = hist.get_baseline()
+                if baseline > 0 and efficiency > 0:
+                    deviation_pct = ((efficiency - baseline) / baseline) * 100
+                    # If efficiency is < 50% of baseline, flag as anomaly
+                    if deviation_pct < -50 and not is_bad:  # Only if not already flagged
+                        is_bad = True
+                        issue_type = "ANOMALY"
         
         # --- STATE TRANSITIONS ---
         

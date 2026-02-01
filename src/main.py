@@ -47,6 +47,60 @@ async def cluster_loop(service: 'ClusterHealthService', bot: TelegramBot):
             
         await asyncio.sleep(30) # Check every 30s
 
+async def digest_loop(health_service: 'ClusterHealthService', bot: TelegramBot):
+    """Send daily digest at midnight."""
+    import time
+    digest_hour = int(os.getenv("DIGEST_HOUR", "0"))  # Default midnight
+    
+    while True:
+        # Calculate time until next digest
+        now = time.localtime()
+        current_hour = now.tm_hour
+        current_min = now.tm_min
+        
+        # Check if it's digest time (within first 5 minutes of the hour)
+        if current_hour == digest_hour and current_min < 5:
+            try:
+                stats = health_service.db.get_today_stats()
+                
+                msg = (
+                    "📊 <b>Daily Digest</b>\n\n"
+                    f"📅 <b>Date</b>: {time.strftime('%Y-%m-%d')}\n"
+                    f"🚨 <b>Incidents</b>: {stats['incidents']}\n"
+                    f"👥 <b>Peak Users</b>: {stats['peak_users']} (<b>{stats['peak_node']}</b>)\n"
+                    f"⚡ <b>Avg Efficiency</b>: {stats['avg_efficiency']:.2f} KB/s/user\n\n"
+                    "Good night! 🌙"
+                )
+                
+                # Send to all admins
+                for admin_id in bot.admin_ids:
+                    if admin_id:
+                        try:
+                            await bot.bot.send_message(chat_id=admin_id, text=msg, parse_mode="HTML")
+                        except Exception as e:
+                            logging.error(f"Failed to send digest to {admin_id}: {e}")
+                
+                logging.info("Daily digest sent!")
+                
+                # Save to database for history
+                health_service.db.save_daily_stats(
+                    time.strftime('%Y-%m-%d'),
+                    stats['incidents'],
+                    0,  # alerts count (could track this later)
+                    stats['peak_users'],
+                    stats['peak_node'],
+                    stats['avg_efficiency']
+                )
+                
+                # Wait until next hour to avoid duplicate sends
+                await asyncio.sleep(3600)
+            except Exception as e:
+                logging.error(f"Digest error: {e}")
+        
+        # Check every 5 minutes
+        await asyncio.sleep(300)
+
+
 async def main():
     # Initialize Services
     remnawave = RemnawaveClient()
@@ -61,6 +115,7 @@ async def main():
     
     asyncio.create_task(heartbeat_loop(bot))
     asyncio.create_task(cluster_loop(health_service, bot))
+    asyncio.create_task(digest_loop(health_service, bot))
     
     # Start Bot (this will block main thread)
     logging.info("Starting Telegram Bot...")
