@@ -40,7 +40,11 @@ def load_config():
         return {"domains": []}
     try:
         with open(CONFIG_FILE, 'r') as f:
-            return yaml.safe_load(f) or {"domains": []}
+            data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict): data = {}
+            if "domains" not in data or data["domains"] is None:
+                data["domains"] = []
+            return data
     except Exception as e:
         print(f"{RED}Error loading config: {e}{RESET}")
         return {"domains": []}

@@ -145,9 +145,9 @@ class NodeHistory:
         return sparkline
 
 class ClusterHealthService:
-    def __init__(self, remnawave_client, config: Dict):
+    def __init__(self, remnawave_client):
         self.remnawave = remnawave_client
-        self.config = config
+        self.api_client = remnawave_client # Alias used in some methods
         self.active_incidents: Dict[str, Incident] = {}
         
         # Cooldown Tracker: {node_name: end_time_timestamp}
