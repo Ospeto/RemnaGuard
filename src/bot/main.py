@@ -54,6 +54,7 @@ class TelegramBot:
         self.dp.message.register(self.cmd_ai_model, Command("ai_model"))
         self.dp.message.register(self.cmd_export, Command("export"))
         self.dp.message.register(self.cmd_dns_status, Command("dns_status"))
+        self.dp.message.register(self.cmd_dns_sync, Command("dns_sync"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))
@@ -985,6 +986,36 @@ class TelegramBot:
         except Exception as e:
             logging.error(f"Approval callback failed: {e}")
             await callback.answer("❌ Error processing approval.")
+
+    async def cmd_dns_sync(self, message: types.Message):
+        """Force a manual DNS sync cycle."""
+        if not self.health_service.cf.enabled:
+            await message.answer("⚠️ Cloudflare Service Disabled.")
+            return
+
+        wait_msg = await message.answer("🔄 **Manual DNS Sync Started...**\nFetching current node states and reconciling with Cloudflare API.")
+        
+        try:
+            # 1. Fetch fresh nodes
+            nodes = await self.health_service.api_client.get_nodes()
+            if not nodes:
+                 await wait_msg.edit_text("❌ Failed to fetch nodes from Remnawave.")
+                 return
+                 
+            # 2. Trigger sync
+            # We don't want to trigger alerts during manual sync, so we pass an empty list
+            changes = await self.health_service._sync_dns_state(nodes, [])
+            
+            if not changes:
+                 await wait_msg.edit_text("✅ **Sync Complete**: Everything is already up to date. No changes needed.")
+            else:
+                 summary = "\n".join([f"• {c}" for c in changes[:5]])
+                 if len(changes) > 5: summary += f"\n...and {len(changes)-5} more."
+                 await wait_msg.edit_text(f"🚀 **Sync Complete!**\nApplied {len(changes)} changes to Cloudflare:\n\n{summary}")
+                 
+        except Exception as e:
+            logging.error(f"Manual Sync Failed: {e}")
+            await wait_msg.edit_text(f"❌ **Sync Failed**: {e}")
 
     async def cmd_dns_status(self, message: types.Message):
         """Show current DNS Config & Status."""

@@ -422,6 +422,8 @@ class ClusterHealthService:
             summary = "\n".join(changes[:3]) # Show max 3 details
             if count > 3: summary += f"\n...and {count-3} more."
             self._trigger_alert(Alert("INFO", f"🔄 DNS State Synced ({count} changes)\n{summary}"), alerts)
+            
+        return changes
 
 
     async def _update_incident_state(self, name: str, speed: float, users: int, alerts: List[Alert]):
