@@ -788,3 +788,34 @@ class TelegramBot:
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         
         await message.answer(msg, parse_mode="HTML", reply_markup=keyboard)
+
+    async def process_model_callback(self, callback: types.CallbackQuery):
+        """Handle model switching callback."""
+        action = callback.data.split("_", 1)[1] # remove model_ prefix
+        
+        if action == "cancel":
+            await callback.message.delete()
+            return
+            
+        model_id = action
+        success = self.health_service.ai.set_model(model_id)
+        
+        # Re-render menu to show checkmark
+        current_model = self.health_service.ai.current_model_name
+        msg = (
+            f"🧠 <b>Gemini Model Selector</b>\n\n"
+            f"Current Model: <code>{current_model}</code>\n\n"
+            "Select a model to switch:"
+        )
+        buttons = []
+        for mid, mname in self.health_service.ai.AVAILABLE_MODELS.items():
+            prefix = "✅ " if mid == current_model else ""
+            buttons.append([InlineKeyboardButton(text=f"{prefix}{mname}", callback_data=f"model_{mid}")])
+        buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="model_cancel")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        if success:
+             await callback.answer(f"Switched to {model_id}!")
+             await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=keyboard)
+        else:
+             await callback.answer(f"Failed to switch to {model_id}.", show_alert=True)
