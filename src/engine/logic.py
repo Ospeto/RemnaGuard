@@ -4,7 +4,9 @@ import os
 import uuid
 from typing import Dict, List, Optional
 from collections import defaultdict, deque
-from ..services.remnawave import RemnawaveClient
+from ..services.database import DatabaseService
+from ..services.ai_analysis import AIService
+from ..services.cloudflare import CloudflareService
 
 class Alert:
     def __init__(self, level: str, message: str, metadata: Dict = None):
@@ -140,22 +142,6 @@ class NodeHistory:
             sparkline += chars[idx]
         
         return sparkline
-
-class ClusterHealthService:
-    def __init__(self, api_client: RemnawaveClient):
-        self.api_client = api_client
-        self.last_check = 0
-        
-        # Tracking
-        self.active_incidents: Dict[str, Incident] = {}
-        self.node_states: Dict[str, Dict] = {} # {node_name: {last_total: int, last_velocity: float}}
-        
-        # Recent Alerts (for /alerts command)
-        self.recent_alerts = deque(maxlen=20)
-        
-from ..services.database import DatabaseService
-from ..services.ai_analysis import AIService
-from ..services.cloudflare import CloudflareService
 
 class ClusterHealthService:
     def __init__(self, remnawave_client, config: Dict):
