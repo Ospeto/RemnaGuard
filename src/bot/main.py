@@ -55,6 +55,7 @@ class TelegramBot:
         self.dp.message.register(self.cmd_export, Command("export"))
         self.dp.message.register(self.cmd_dns_status, Command("dns_status"))
         self.dp.message.register(self.cmd_dns_sync, Command("dns_sync"))
+        self.dp.message.register(self.cmd_dns_sync, Command("dns_rotate"))
         
         # Register Callbacks
         self.dp.callback_query.register(self.process_config_callback, lambda c: c.data and c.data.startswith("cfg_"))

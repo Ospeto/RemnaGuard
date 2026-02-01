@@ -94,6 +94,11 @@ cp install.sh "$INSTALL_DIR/"
 cd "$INSTALL_DIR"
 
 # Ensure config.yml exists as a file (prevent Docker creating it as a directory)
+if [ -d config.yml ]; then
+    echo "⚠️  Found config.yml as a directory (Docker mount error). Fixing..."
+    rm -rf config.yml
+fi
+
 if [ ! -f config.yml ]; then
     echo ">>> Initializing empty config.yml..."
     echo "domains: []" > config.yml
