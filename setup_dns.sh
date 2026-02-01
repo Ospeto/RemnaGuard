@@ -19,10 +19,15 @@ then
     exit 1
 fi
 
-# Ensure Virtual Environment exists (to avoid breaking system packages)
+# Ensure Virtual Environment exists
 if [ ! -d ".venv" ]; then
     echo "📦 Creating virtual environment (.venv)..."
-    python3 -m venv .venv
+    python3 -m venv .venv || {
+        echo "❌ Error: Failed to create virtual environment."
+        echo "   If you are on Ubuntu/Debian, please run:"
+        echo "   sudo apt-get update && sudo apt-get install python3-venv"
+        exit 1
+    }
 fi
 
 # Activate venv

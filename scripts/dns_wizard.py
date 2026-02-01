@@ -1,10 +1,9 @@
-import json
 import os
 import sys
 import time
 import shutil
 
-# Try importing yaml, if fails, we will handle it in the wrapper script or show error
+# Try importing yaml
 try:
     import yaml
 except ImportError:
@@ -48,30 +47,25 @@ def load_config():
 
 def save_config(config):
     try:
-        # Create backup
         if os.path.exists(CONFIG_FILE):
             shutil.copy(CONFIG_FILE, f"{CONFIG_FILE}.bak")
         
         with open(CONFIG_FILE, 'w') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
         print(f"\n{GREEN}✅ Configuration saved to {CONFIG_FILE}!{RESET}")
-        time.sleep(1.5)
+        time.sleep(1)
     except Exception as e:
         print(f"\n{RED}❌ Failed to save config: {e}{RESET}")
         input("Press Enter to continue...")
 
 def input_clean(prompt, default=None):
-    valid = False
-    while not valid:
-        d_str = f" [{default}]" if default else ""
-        val = input(f"{YELLOW}{prompt}{d_str}: {RESET}").strip()
-        if not val and default:
-            return default
-        if val:
-            return val
+    d_str = f" [{default}]" if default else ""
+    val = input(f"{YELLOW}{prompt}{d_str}: {RESET}").strip()
+    if not val and default:
+        return default
+    return val
 
 def manage_ips(current_ips):
-    print(f"\n{BOLD}Managing IPs{RESET}")
     ips = list(current_ips)
     while True:
         print(f"\nCurrent IPs: {GREEN}{', '.join(ips) if ips else '(none)'}{RESET}")
@@ -80,34 +74,71 @@ def manage_ips(current_ips):
         print("3. Done")
         
         choice = input(f"{YELLOW}Select option: {RESET}")
-        
         if choice == '1':
             new_ip = input_clean("Enter IP address")
-            if new_ip not in ips:
+            if new_ip and new_ip not in ips:
                 ips.append(new_ip)
         elif choice == '2':
-            if not ips:
-                print("No IPs to remove.")
-                continue
             to_remove = input_clean("Enter IP to remove")
             if to_remove in ips:
                 ips.remove(to_remove)
-            else:
-                print(f"{RED}IP not found.{RESET}")
         elif choice == '3':
-             try:
-                 node_name = nodes[int(idx)-1]
-                 del mappings[node_name]
-                 print(f"\n{RED}🗑️  Deleted {node_name}{RESET}")
-                 time.sleep(1)
-             except: pass
-        elif choice == 's':
-            mappings["_comment"] = comment
-            save_config(mappings)
             break
-        elif choice == 'q':
-            print("Bye!")
-            sys.exit(0)
+    return ips
+
+def main():
+    config = load_config()
+    if "domains" not in config: config["domains"] = []
+    
+    while True:
+        print_header()
+        print(f"{BOLD}Current Configuration:{RESET}")
+        if not config["domains"]:
+            print("  (Empty)")
+        else:
+            for i, d in enumerate(config["domains"]):
+                print(f"{i+1}. {BOLD}{d.get('domain')}{RESET}")
+                for z in d.get("zones", []):
+                    ips_str = ", ".join(z.get('ips', []))
+                    print(f"   • {CYAN}{z.get('name')}{RESET} -> {ips_str}")
+        
+        print(f"\n{BOLD}Menu:{RESET}")
+        print("1. Add/Edit Domain")
+        print("2. Delete Domain")
+        print("3. Save & Exit")
+        print("4. Exit Without Saving")
+        
+        choice = input(f"\n{YELLOW}Select option: {RESET}")
+        
+        if choice == '1':
+            domain_name = input_clean("Enter Domain (e.g. example.com)")
+            domain = next((d for d in config["domains"] if d["domain"] == domain_name), None)
+            if not domain:
+                domain = {"domain": domain_name, "zones": []}
+                config["domains"].append(domain)
+            
+            zone_name = input_clean("Enter Zone Name (@ or subdomain)", default="@")
+            zone = next((z for z in domain["zones"] if z["name"] == zone_name), None)
+            if not zone:
+                zone = {"name": zone_name, "ips": [], "proxied": False, "ttl": 1}
+                domain["zones"].append(zone)
+            
+            zone["ips"] = manage_ips(zone["ips"])
+            proxied = input_clean("Cloudflare Proxy? (y/n)", default="y" if zone["proxied"] else "n")
+            zone["proxied"] = True if proxied.lower() == 'y' else False
+            
+        elif choice == '2':
+            if not config["domains"]: continue
+            idx = int(input_clean("Enter domain number to delete") or 0) - 1
+            if 0 <= idx < len(config["domains"]):
+                del config["domains"][idx]
+                
+        elif choice == '3':
+            save_config(config)
+            break
+        elif choice == '4':
+            print("Changes discarded.")
+            break
 
 if __name__ == "__main__":
     main()
