@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from collections import defaultdict, deque
 from ..services.remnawave import RemnawaveClient
 from ..services.database import DatabaseService
+from ..services.ai_analysis import AIService
 
 class Alert:
     def __init__(self, level: str, message: str, metadata: Dict = None):
