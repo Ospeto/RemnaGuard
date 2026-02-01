@@ -23,6 +23,7 @@ class Incident:
     STATE_SUSPICIOUS = "SUSPICIOUS"
     STATE_VERIFYING = "VERIFYING"
     STATE_CONFIRMED = "CONFIRMED"
+    STATE_AWAIT_APPROVAL = "AWAIT_APPROVAL"
     STATE_RESOLVED = "RESOLVED"
     
     def __init__(self, node_name: str, issue_type: str, severity: str):
@@ -183,7 +184,8 @@ class ClusterHealthService:
         self.config = {
             "min_users": int(os.getenv("THROTTLE_MIN_USERS", "3")),
             "min_speed": int(os.getenv("THROTTLE_SPEED_LIMIT", "50")),
-            "min_efficiency": int(os.getenv("THROTTLE_PER_USER", "20")) # Lower default for V2 to reduce noise
+            "min_efficiency": int(os.getenv("THROTTLE_PER_USER", "20")),
+            "auto_mode": self.cf.config.get("dns_auto_mode", False)
         }
         
         # Tuning Constants
@@ -296,6 +298,12 @@ class ClusterHealthService:
                     logging.error(f"Error processing node {node.get('name')}: {e}")
                     
             self.last_check = now
+            
+            # --- PHASE 15: PERIODIC DNS SYNC (STATE-BASED) ---
+            if self.cf.enabled:
+                await self._sync_dns_state(nodes, alerts)
+            # -------------------------------------------------
+            
             return alerts
 
         except Exception as e:
@@ -386,6 +394,43 @@ class ClusterHealthService:
         await self._update_incident_state(name, smoothed_velocity, users, alerts)
 
 
+    async def _sync_dns_state(self, nodes: List[Dict], alerts: List[Alert]):
+        """
+        Calculates the set of 'Healthy IPs' and pushes state to Cloudflare.
+        Definitions of Healthy:
+        1. Node is Online & Connected.
+        2. Node is NOT in a confirmed 'Throttling/Blocking' incident.
+        """
+        healthy_ips = set()
+        
+        for node in nodes:
+            name = node.get("name")
+            ip = node.get("address") or node.get("ip")
+            if not ip: continue
+            
+            # 1. Basic Health (Offline?)
+            is_connected = node.get("isConnected", True)
+            if not is_connected: continue
+            
+            # 2. Advanced Health (AI/Logic Incident?)
+            # Valid states: None, SUSPICIOUS, VERIFYING.
+            # Invalid states: CONFIRMED.
+            incident = self.active_incidents.get(name)
+            if incident and incident.state == Incident.STATE_CONFIRMED:
+                continue # Skip calling it healthy
+                
+            healthy_ips.add(ip)
+            
+        # Execute Sync
+        changes = await self.cf.sync_all(healthy_ips)
+        
+        if changes:
+            count = len(changes)
+            summary = "\n".join(changes[:3]) # Show max 3 details
+            if count > 3: summary += f"\n...and {count-3} more."
+            self._trigger_alert(Alert("INFO", f"🔄 DNS State Synced ({count} changes)\n{summary}"), alerts)
+
+
     async def _update_incident_state(self, name: str, speed: float, users: int, alerts: List[Alert]):
         """
         State Machine Logic:
@@ -448,7 +493,10 @@ class ClusterHealthService:
                 # FAST TRACK?
                 if issue_type == "GHOST_THROTTLE":
                     logging.warning(f"FAST TRACK: GFW Signature on {name}")
-                    new_incident.state = Incident.STATE_CONFIRMED
+                    if self.config.get("auto_mode", False):
+                        new_incident.state = Incident.STATE_CONFIRMED
+                    else:
+                        new_incident.state = Incident.STATE_AWAIT_APPROVAL
                     self._trigger_alert(new_incident, alerts)
                 else:
                     logging.info(f"LogicV2: New Suspicious Event {name} ({issue_type})")
@@ -505,35 +553,14 @@ class ClusterHealthService:
                 verdict = await self.ai.verify_incident(incident.node_name, {"speed": 0, "users": incident.max_users}, history, neg_examples)
                 
                 if verdict == "CONFIRMED":
-                    incident.state = Incident.STATE_CONFIRMED
-                    self._trigger_alert(incident, alerts)
+                    if self.config.get("auto_mode", False):
+                        incident.state = Incident.STATE_CONFIRMED
+                        logging.info(f"AI: Confirmed incident for {name} (AUTO-MODE: Dropping DNS)")
+                    else:
+                        incident.state = Incident.STATE_AWAIT_APPROVAL
+                        logging.info(f"AI: Confirmed incident for {name} (MANUAL-MODE: Awaiting Approval)")
                     
-                    # --- PHASE 12 & 14: DNS MITIGATION & PERSISTENCE ---
-                    if self.cf.enabled:
-                         # FAIL-SAFE: Prevent >50% lockout
-                         total_nodes = len(self.node_history)
-                         active_bans = len(self.dns_cooldowns)
-                         if total_nodes > 2 and (active_bans + 1) > (total_nodes / 2):
-                             logging.warning(f"🛡️ SAFETY INTERLOCK: Preventing ban on {incident.node_name} to avoid >50% cluster washout.")
-                             self._trigger_alert(Alert("CRITICAL", f"⚠️ Safety Interlock prevented banning {incident.node_name}"), alerts)
-                         else:
-                             logging.info(f"Removing DNS for {incident.node_name} (Throttling Confirmed)")
-                             
-                             # Phase 14: Safe Delete (Capture IP)
-                             deleted_ip = await self.cf.delete_record(incident.node_name)
-                             
-                             if deleted_ip:
-                                 # Set Cooldown: Now + 60 mins
-                                 cooldown_end = time.time() + 3600
-                                 self.dns_cooldowns[incident.node_name] = cooldown_end
-                                 
-                                 # Persist to DB
-                                 self.db.save_dns_state(incident.node_name, deleted_ip, cooldown_end)
-                                 
-                                 self._trigger_alert(Alert("INFO", f"🚫 Node {incident.node_name} removed from DNS (Cooldown 1h)"), alerts)
-                             else:
-                                 logging.warning(f"Could not remove DNS for {incident.node_name} (Record not found?)")
-                    # -------------------------------------------
+                    self._trigger_alert(incident, alerts)
                     
                 elif verdict == "IGNORE":
                      incident.state = Incident.STATE_RESOLVED
@@ -544,37 +571,10 @@ class ClusterHealthService:
                      self.db.save_incident(incident.__dict__)
 
         elif incident.state == Incident.STATE_CONFIRMED:
-            # Still failing...
-            # --- PHASE 12 & 14: COOLDOWN EXPIRY & RESTORATION ---
-            cooldown_end = self.dns_cooldowns.get(name, 0)
-            if cooldown_end > 0 and time.time() > cooldown_end:
-                 # Cooldown passed. Re-add DNS for TRIAL.
-                 logging.info(f"Cooldown expired for {name}. RESTORING DNS.")
-                 
-                 ip = None
-                 # Phase 14: Try to get original IP from DB first
-                 dns_state = self.db.get_dns_state(name)
-                 if dns_state:
-                     ip = dns_state.get("original_ip")
-                     logging.info(f"Found saved IP for {name}: {ip}")
-                 
-                 # Fallback to Remnawave API if IP missing
-                 if not ip:
-                     try:
-                         nodes = await self.remnawave.get_nodes()
-                         node_info = next((n for n in nodes if n.get("name") == name), None)
-                         if node_info:
-                             ip = node_info.get("address") or node_info.get("ip")
-                     except Exception as e:
-                         logging.error(f"Failed to fetch IP from API: {e}")
-                         
-                 if ip and await self.cf.update_record(name, ip):
-                     # Restored!
-                     del self.dns_cooldowns[name]
-                     self.db.clear_dns_state(name) # Clear persistence
-                     self._trigger_alert(Alert("INFO", f"✅ Node {name} DNS restored (Probation Trial)"), alerts)
-                 else:
-                     logging.warning(f"Could not restore DNS for {name}: IP not found.")
+             # Still failing...
+             # We just wait. If it recovers, our logic elsewhere (check incident expiry)
+             # or manual restoration will clear the incident state.
+             pass
                 
         # B3. Re-Alert logic for Confirmed?
         # If confirmed, we already alerted. Maybe remind every hour?
@@ -604,6 +604,7 @@ class ClusterHealthService:
             message=msg,
             metadata={
                 "node": incident.node_name,
+                "state": incident.state,
                 "duration": f"{incident.duration():.0f}s",
                 "users": str(incident.logs[-1]["users"]),
                 "speed": f"{incident.logs[-1]['speed']:.1f} KB/s"

@@ -61,12 +61,13 @@ class TelegramBot:
         self.dp.callback_query.register(self.process_node_callback, lambda c: c.data and c.data.startswith("node_"))
         self.dp.callback_query.register(self.process_model_callback, lambda c: c.data and c.data.startswith("model_"))
         self.dp.callback_query.register(self.process_feedback_callback, lambda c: c.data and c.data.startswith("ai_fb:"))
+        self.dp.callback_query.register(self.process_approval_callback, lambda c: c.data and c.data.startswith("ai_app:"))
 
     async def start(self):
         await self.dp.start_polling(self.bot)
 
     async def send_alert(self, alert: Alert):
-        node_name = os.getenv("NODE_NAME", "Unknown Node")
+        node_name = alert.metadata.get("node", "Unknown")
         emoji_map = {
             "CRITICAL": "🚨",
             "WARNING": "⚠️",
@@ -74,26 +75,43 @@ class TelegramBot:
         }
         emoji = emoji_map.get(alert.level, "ℹ️")
         
+        # Check if this is an Incident approval request
+        # We look at metadata for 'incident_state'
+        is_approval_req = alert.metadata.get("state") == "AWAIT_APPROVAL"
+        
         message = f"{emoji} *{alert.message}*\n"
+        if is_approval_req:
+            message = f"🛡️ **DNS APPROVAL REQUIRED**\nAI detected an incident on {node_name} and is waiting for your decision.\n\n"
+        
         message += f"🌍 *Node*: {node_name}\n"
         if alert.metadata:
             for k, v in alert.metadata.items():
-                message += f"*{k.capitalize()}*: {v}\n"
+                if k not in ["node", "state"]: # Skip these in body
+                    message += f"*{k.capitalize()}*: {v}\n"
+        
+        # Reply Markup for Approvals
+        reply_markup = None
+        if is_approval_req:
+            reply_markup = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Approve (Drop DNS)", callback_data=f"ai_app:CONFIRM:{node_name}"),
+                    InlineKeyboardButton(text="❌ Reject (Keep DNS)", callback_data=f"ai_app:REJECT:{node_name}")
+                ]
+            ])
         
         # Broadcast to all admins (Parallel)
-
         tasks = []
         for admin_id in self.admin_ids:
             if admin_id:
-                tasks.append(self.send_safe_message(admin_id, message))
+                tasks.append(self.send_safe_message(admin_id, message, reply_markup=reply_markup))
         
         await asyncio.gather(*tasks)
 
-    async def send_safe_message(self, chat_id: int, text: str):
+    async def send_safe_message(self, chat_id: int, text: str, reply_markup=None):
         """Helper to send message with retry logic."""
         for attempt in range(3):
             try:
-                await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=reply_markup)
                 return
             except Exception as e:
                 err = str(e)
@@ -892,14 +910,18 @@ class TelegramBot:
             # Save to DB
             self.health_service.db.save_feedback(node_name, context_summary, verdict, rating)
             
-            # Phase 14: SMART UNDO
-            # If user says "WRONG" (👎) and node is currently banned, UNBAN IT.
+            # Phase 14/15: SMART UNDO (State-Based)
+            # If user says "WRONG" and node has an active incident, CLEAR IT.
             undo_msg = ""
-            if rating == "WRONG" and node_name in self.health_service.dns_cooldowns:
-                # Force cooldown expiry
-                self.health_service.dns_cooldowns[node_name] = 0.0
-                undo_msg = "\n🛡️ **Smart Undo Triggered**: DNS restoration queued."
-                logging.info(f"Smart Undo: Triggering early restoration for {node_name}")
+            if rating == "WRONG" and node_name in self.health_service.active_incidents:
+                # Remove the incident. The next periodic sync will see it as healthy and restore DNS.
+                del self.health_service.active_incidents[node_name]
+                
+                # Also clear DB persistence if any
+                # self.health_service.db.resolve_incident(...) # Optional, loop handles it
+                
+                undo_msg = "\n🛡️ **Smart Undo Triggered**: Incident cleared. DNS will sync shortly."
+                logging.info(f"Smart Undo: Cleared incident for {node_name}")
 
             await callback.answer(f"Thanks! Feedback recorded: {rating}")
             
@@ -915,37 +937,84 @@ class TelegramBot:
             
             # Remove buttons to prevent double voting
             await callback.message.edit_reply_markup(reply_markup=None)
+
+    async def process_approval_callback(self, callback: types.CallbackQuery):
+        """Handle user approval/rejection of AI incidents."""
+        # ai_app:ACTION:node_name
+        try:
+            _, action, node_name = callback.data.split(":", 2)
             
+            incident = self.health_service.active_incidents.get(node_name)
+            if not incident:
+                await callback.answer("❌ Incident no longer active (Already resolved?)", show_alert=True)
+                await callback.message.edit_reply_markup(reply_markup=None)
+                return
+
+            if action == "CONFIRM":
+                incident.state = "CONFIRMED"
+                # Clear alerted flag to allow the bot to send the "Incident Confirmed" notification
+                # if logic.py's trigger_alert would otherwise block it.
+                # Actually, trigger_alert debounces by incident object.
+                # Let's just update UI.
+                await callback.answer(f"✅ Approved: {node_name} dropped from DNS.")
+                await callback.message.edit_text(
+                    callback.message.text + f"\n\n✅ **Approved by Admin**. DNS Syncing...",
+                    reply_markup=None
+                )
+                logging.info(f"Admin APPROVED ban for {node_name}")
+                
+            elif action == "REJECT":
+                # Resolve incident as False Positive
+                incident.state = "RESOLVED"
+                incident.status = "Rejected by Admin"
+                
+                # Save to DB
+                self.health_service.db.save_incident(incident.__dict__)
+                
+                # Remove from active
+                if node_name in self.health_service.active_incidents:
+                    del self.health_service.active_incidents[node_name]
+                
+                await callback.answer(f"❌ Rejected: {node_name} remains in DNS.")
+                await callback.message.edit_text(
+                    callback.message.text + f"\n\n❌ **Rejected by Admin**. Node remains active.",
+                    reply_markup=None
+                )
+                logging.info(f"Admin REJECTED ban for {node_name}")
+
         except Exception as e:
-            logging.error(f"Feedback callback failed: {e}")
-            await callback.answer("❌ Error recording feedback.")
+            logging.error(f"Approval callback failed: {e}")
+            await callback.answer("❌ Error processing approval.")
 
     async def cmd_dns_status(self, message: types.Message):
-        """Show current DNS Cooldowns and Mappings."""
-        cooldowns = self.health_service.dns_cooldowns
-        
-        msg = "🌐 <b>DNS Management Status</b>\n\n"
-        
-        # 1. Cooldowns
-        if cooldowns:
-            msg += "<b>⏳ Active Cooldowns (Probation)</b>:\n"
-            now = time.time()
-            for node, end_time in cooldowns.items():
-                remaining = int((end_time - now) / 60)
-                if remaining > 0:
-                    msg += f"❌ <b>{node}</b>: Re-enabling in {remaining} mins\n"
-                else:
-                    msg += f"♻️ <b>{node}</b>: Retrying anytime now...\n"
-        else:
-            msg += "✅ All monitored nodes are Healthy (No Cooldowns)\n"
+        """Show current DNS Config & Status."""
+        if not self.health_service.cf.enabled:
+            await message.answer("⚠️ Cloudflare Service Disabled (Missing Token or Config)")
+            return
             
-        # 2. Config
-        msg += "\n<b>⚙️ Configured Mappings:</b>\n"
-        if self.health_service.cf.enabled:
-            mappings = self.health_service.cf.mappings
-            for node, conf in mappings.items():
-                 msg += f"• {node} → <code>{conf.get('domain')}</code>\n"
+        msg = "🌐 <b>DNS Management Status (State-Based)</b>\n\n"
+        
+        # Show configured domains
+        config = self.health_service.cf.config
+        domains = config.get("domains", [])
+        
+        for d in domains:
+            msg += f"<b>Domain</b>: {d.get('domain')}\n"
+            for z in d.get("zones", []):
+                z_name = z.get('name')
+                full = f"{z_name}.{d.get('domain')}" if z_name != "@" else d.get('domain')
+                ips = z.get('ips', [])
+                msg += f"  • <b>{full}</b>: {len(ips)} IPs configured\n"
+                
+        # Show specific bans (Incidents that are blocking IPs)
+        blocked_nodes = [name for name, inc in self.health_service.active_incidents.items() 
+                        if inc.state == "CONFIRMED"]
+        
+        if blocked_nodes:
+            msg += "\n🚫 <b>Active Blocks (Excluded from DNS)</b>:\n"
+            for n in blocked_nodes:
+                msg += f"  • {n} (Throttled/Unhealthy)\n"
         else:
-             msg += "⚠️ Cloudflare Service Disabled (Missing Token or Mappings)"
-             
+            msg += "\n✅ All nodes are healthy & synced."
+            
         await message.answer(msg, parse_mode="HTML")

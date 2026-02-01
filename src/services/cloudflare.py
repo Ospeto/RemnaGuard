@@ -1,35 +1,37 @@
+import asyncio
 import httpx
 import logging
 import os
-import json
-from typing import Optional, List, Dict
+import yaml
+from typing import List, Dict, Optional, Set
 
 class CloudflareService:
-    """Manages Cloudflare DNS records for RemnaGuard nodes."""
+    """
+    Manages Cloudflare DNS records using a 'Desired State' approach.
+    Syncs the actual Cloudflare records to match the 'healthy' IPs from config.
+    """
     
     BASE_URL = "https://api.cloudflare.com/client/v4"
     
-    def __init__(self, mapping_file: str = "config/dns_mapping.json"):
+    def __init__(self, config_path: str = "config.yml"):
         self.token = os.getenv("CLOUDFLARE_API_TOKEN")
-        self.zone_id = os.getenv("CLOUDFLARE_ZONE_ID")
-        self.mapping_file = mapping_file
-        self.mappings = self._load_mappings()
-        self.enabled = bool(self.token and self.mappings)
+        self.config_path = config_path
+        self.enabled = bool(self.token) and os.path.exists(config_path)
+        self.zone_cache = {} # {domain: zone_id}
         
         if self.enabled:
-            logging.info("Cloudflare integration enabled.")
+            logging.info("Cloudflare Service initialized (State-Based).")
+            self.config = self._load_config()
         else:
-            logging.info("Cloudflare disabled (missing token or mapping).")
+            logging.warning("Cloudflare Service disabled (Missing token or config.yml).")
+            self.config = {}
 
-    def _load_mappings(self) -> Dict:
-        """Load node->dns mappings from JSON."""
-        if not os.path.exists(self.mapping_file):
-            return {}
+    def _load_config(self) -> Dict:
         try:
-            with open(self.mapping_file, 'r') as f:
-                return json.load(f)
+            with open(self.config_path, 'r') as f:
+                return yaml.safe_load(f) or {}
         except Exception as e:
-            logging.error(f"Failed to load DNS mappings: {e}")
+            logging.error(f"Failed to load config.yml: {e}")
             return {}
 
     async def _get_headers(self) -> Dict:
@@ -39,10 +41,12 @@ class CloudflareService:
         }
 
     async def get_zone_id(self, domain: str) -> Optional[str]:
-        """Auto-discover Zone ID for a domain."""
-        if self.zone_id: return self.zone_id
-        
-        # Extract root domain (simple heuristic)
+        """Auto-discover Zone ID for a domain (Cached)."""
+        if domain in self.zone_cache:
+            return self.zone_cache[domain]
+            
+        # Extract root domain (simple heuristic: example.com)
+        # Improvement: Handle co.uk etc if needed, but for now take last 2 parts
         root_domain = ".".join(domain.split(".")[-2:])
         
         async with httpx.AsyncClient() as client:
@@ -54,116 +58,141 @@ class CloudflareService:
                 )
                 data = resp.json()
                 if data["success"] and data["result"]:
-                    return data["result"][0]["id"]
+                    zone_id = data["result"][0]["id"]
+                    self.zone_cache[domain] = zone_id
+                    return zone_id
             except Exception as e:
                 logging.error(f"Failed to get Zone ID for {domain}: {e}")
         return None
 
-    async def update_record(self, node_name: str, ip: str) -> bool:
-        """Create or Update A record for the node."""
-        if not self.enabled: return False
+    async def sync_all(self, healthy_ips: Set[str]) -> List[str]:
+        """
+        Main Sync Entrypoint.
+        Ensures that for every configured zone, ONLY the healthy IPs are present.
+        Returns a list of changes made.
+        """
+        if not self.enabled: return []
         
-        config = self.mappings.get(node_name)
-        if not config: return False # Node not mapped
+        changes = []
+        domains_conf = self.config.get("domains", [])
         
-        domain = config["domain"]
-        proxied = config.get("proxied", False)
+        tasks = []
+        for d_conf in domains_conf:
+            domain_root = d_conf.get("domain")
+            # We need to await zone_id (or cache it) - this part is fast if cached.
+            # But strictly speaking we can't fully parallelize getting zone ID without lock or race condition if not cached.
+            # But get_zone_id handles its own HTTP call. 
+            # Let's parallelize the PER-ZONE work.
+            
+            # We need to launch a task effectively.
+            tasks.append(self._process_domain_sync(d_conf, healthy_ips))
+            
+        # Run all domain syncs in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        zone_id = await self.get_zone_id(domain)
-        if not zone_id:
-            logging.error(f"Could not find Zone ID for {domain}")
-            return False
+        for res in results:
+            if isinstance(res, list):
+                changes.extend(res)
+            elif isinstance(res, Exception):
+                logging.error(f"Domain sync failed: {res}")
+                
+        return changes
 
+    async def _process_domain_sync(self, d_conf: Dict, healthy_ips: Set[str]) -> List[str]:
+        """Helper to process a single domain's zones (for parallel execution)."""
+        changes = []
+        domain_root = d_conf.get("domain")
+        zone_id = await self.get_zone_id(domain_root)
+        
+        if not zone_id:
+            logging.error(f"Skipping {domain_root}: Zone ID not found.")
+            return []
+            
+        # Process zones within this domain
+        # We can also parallelize THESE if needed, but per-domain parallelism is usually enough.
+        # Let's keep it simple: Per-Domain Parallelism.
+        
+        for zone_conf in d_conf.get("zones", []):
+            subdomain = zone_conf.get("name")
+            configured_ips = set(zone_conf.get("ips", []))
+            proxied = zone_conf.get("proxied", False)
+            ttl = zone_conf.get("ttl", 1) 
+            
+            full_name = f"{subdomain}.{domain_root}" if subdomain != "@" else domain_root
+            
+            # Determine Target State
+            target_ips = configured_ips.intersection(healthy_ips)
+            
+            if not target_ips:
+                logging.warning(f"⚠️ No healthy IPs available for {full_name}!")
+            
+            # Execute Sync
+            zone_changes = await self._sync_zone_records(
+                zone_id=zone_id,
+                record_name=full_name,
+                target_ips=target_ips,
+                proxied=proxied,
+                ttl=ttl
+            )
+            changes.extend(zone_changes)
+            
+        return changes
+
+    async def _sync_zone_records(self, zone_id: str, record_name: str, target_ips: Set[str], proxied: bool, ttl: int) -> List[str]:
+        """Reconcile active records with target IPs."""
+        changes = []
         async with httpx.AsyncClient() as client:
+            headers = await self._get_headers()
+            
+            # 1. Fetch Existing Records
             try:
-                # 1. Check existing records
-                headers = await self._get_headers()
                 resp = await client.get(
                     f"{self.BASE_URL}/zones/{zone_id}/dns_records",
                     headers=headers,
-                    params={"type": "A", "name": domain}
+                    params={"type": "A", "name": record_name}
                 )
-                records = resp.json().get("result", [])
+                data = resp.json()
+                if not data["success"]:
+                    logging.error(f"Failed to fetch records for {record_name}: {data.get('errors')}")
+                    return []
+                    
+                existing_records = data.get("result", [])
+                existing_map = {r["content"]: r["id"] for r in existing_records}
+                existing_ips = set(existing_map.keys())
                 
-                # 2. Update or Create
-                payload = {
-                    "type": "A",
-                    "name": domain,
-                    "content": ip,
-                    "ttl": 1, # Auto
-                    "proxied": proxied,
-                    "comment": "Managed by RemnaGuard"
-                }
+                # 2. Calculate Diff
+                to_add = target_ips - existing_ips
+                to_remove = existing_ips - target_ips
                 
-                if records:
-                    # Update existing
-                    record_id = records[0]["id"]
-                    # Only update if content changed
-                    if records[0]["content"] == ip and records[0]["proxied"] == proxied:
-                        return True # No change needed
-                        
-                    resp = await client.put(
-                        f"{self.BASE_URL}/zones/{zone_id}/dns_records/{record_id}",
-                        headers=headers,
-                        json=payload
+                # 3. Apply Removals
+                for ip in to_remove:
+                    rec_id = existing_map[ip]
+                    await client.delete(
+                        f"{self.BASE_URL}/zones/{zone_id}/dns_records/{rec_id}",
+                        headers=headers
                     )
-                else:
-                    # Create new
-                    resp = await client.post(
+                    changes.append(f"🗑️ Removed {ip} from {record_name}")
+                    logging.info(f"Deleted DNS: {record_name} -> {ip}")
+                    
+                # 4. Apply Additions
+                for ip in to_add:
+                    payload = {
+                        "type": "A",
+                        "name": record_name,
+                        "content": ip,
+                        "ttl": ttl,
+                        "proxied": proxied,
+                        "comment": "Managed by RemnaGuard"
+                    }
+                    await client.post(
                         f"{self.BASE_URL}/zones/{zone_id}/dns_records",
                         headers=headers,
                         json=payload
                     )
-                
-                success = resp.json().get("success", False)
-                if success:
-                    logging.info(f"DNS Updated: {domain} -> {ip}")
-                else:
-                    logging.error(f"DNS Update Failed: {resp.text}")
-                return success
-
+                    changes.append(f"📝 Added {ip} to {record_name}")
+                    logging.info(f"Created DNS: {record_name} -> {ip}")
+                    
             except Exception as e:
-                logging.error(f"Cloudflare API error: {e}")
-                return False
-
-    async def delete_record(self, node_name: str) -> Optional[str]:
-        """Remove A record and return the IP that was deleted."""
-        if not self.enabled: return None
-        
-        config = self.mappings.get(node_name)
-        if not config: return None
-        
-        domain = config["domain"]
-        zone_id = await self.get_zone_id(domain)
-        if not zone_id: return None
-
-        async with httpx.AsyncClient() as client:
-            try:
-                headers = await self._get_headers()
-                # Find record
-                resp = await client.get(
-                    f"{self.BASE_URL}/zones/{zone_id}/dns_records",
-                    headers=headers,
-                    params={"type": "A", "name": domain}
-                )
-                records = resp.json().get("result", [])
+                logging.error(f"Sync error for {record_name}: {e}")
                 
-                if not records:
-                    return None # Already gone
-                
-                record_id = records[0]["id"]
-                params_ip = records[0]["content"] # Capture IP
-                
-                resp = await client.delete(
-                    f"{self.BASE_URL}/zones/{zone_id}/dns_records/{record_id}",
-                    headers=headers
-                )
-                
-                if resp.json().get("success"):
-                     logging.info(f"DNS Record DELETED: {domain} (was {params_ip})")
-                     return params_ip
-                return None
-                
-            except Exception as e:
-                logging.error(f"Cloudflare Delete failed: {e}")
-                return None
+        return changes

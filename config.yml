@@ -1,0 +1,33 @@
+remnawave:
+  check-interval: 30
+
+telegram:
+  enabled: true
+  notify:
+    node_changes: true
+    dns_changes: true
+    errors: true
+    critical: true
+
+domains:
+  # --- Region 1: US West ---
+  # - domain: myvpn-us.com
+  #   zones:
+  #     - name: @                 # Root domain (myvpn-us.com)
+  #       proxied: true
+  #       ips:
+  #         - 1.2.3.4             # US Node 1
+  #         - 1.2.3.5             # US Node 2
+
+  # --- DNS AUTO-MITIGATION ---
+# Set to 'true' for fully autonomous management (AI decides)
+# Set to 'false' for manual approval via Telegram buttons
+dns_auto_mode: false
+
+  # --- Region 2: Europe ---
+  # - domain: myvpn-eu.com
+  #   zones:
+  #     - name: premium           # premium.myvpn-eu.com
+  #       proxied: false
+  #       ips:
+

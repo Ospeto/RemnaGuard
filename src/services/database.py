@@ -1,3 +1,4 @@
+import datetime
 import sqlite3
 import os
 import logging
@@ -232,7 +233,6 @@ class DatabaseService:
                 return 100.0  # Assume online if no logs
             
             # Calculate time spent online
-            import datetime
             total_seconds = days * 24 * 3600
             online_seconds = 0
             last_online_time = None
