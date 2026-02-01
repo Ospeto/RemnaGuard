@@ -152,6 +152,14 @@ class ClusterHealthService:
         # Cooldown Tracker: {node_name: end_time_timestamp}
         self.dns_cooldowns: Dict[str, float] = {} 
         
+        # Phase 14: Restore active bans from Database
+        try:
+             self.dns_cooldowns = self.db.get_all_active_bans()
+             if self.dns_cooldowns:
+                 logging.info(f"Restored {len(self.dns_cooldowns)} active DNS bans from DB.")
+        except Exception as e:
+             logging.error(f"Failed to restore DNS bans: {e}") 
+        
         # Recent Alerts (for /alerts command)
         self.recent_alerts = deque(maxlen=20)
         
@@ -500,47 +508,73 @@ class ClusterHealthService:
                     incident.state = Incident.STATE_CONFIRMED
                     self._trigger_alert(incident, alerts)
                     
-                    # --- PHASE 12: DNS MITIGATION & COOLDOWN ---
+                    # --- PHASE 12 & 14: DNS MITIGATION & PERSISTENCE ---
                     if self.cf.enabled:
-                         logging.info(f"Removing DNS for {incident.node_name} (Throttling Confirmed)")
-                         if await self.cf.delete_record(incident.node_name):
-                             # Set Cooldown: Now + 60 mins
-                             self.dns_cooldowns[incident.node_name] = time.time() + 3600
-                             self._trigger_alert(Alert("INFO", f"🚫 Node {incident.node_name} removed from DNS (Cooldown 1h)"), alerts)
+                         # FAIL-SAFE: Prevent >50% lockout
+                         total_nodes = len(self.node_history)
+                         active_bans = len(self.dns_cooldowns)
+                         if total_nodes > 2 and (active_bans + 1) > (total_nodes / 2):
+                             logging.warning(f"🛡️ SAFETY INTERLOCK: Preventing ban on {incident.node_name} to avoid >50% cluster washout.")
+                             self._trigger_alert(Alert("CRITICAL", f"⚠️ Safety Interlock prevented banning {incident.node_name}"), alerts)
+                         else:
+                             logging.info(f"Removing DNS for {incident.node_name} (Throttling Confirmed)")
+                             
+                             # Phase 14: Safe Delete (Capture IP)
+                             deleted_ip = await self.cf.delete_record(incident.node_name)
+                             
+                             if deleted_ip:
+                                 # Set Cooldown: Now + 60 mins
+                                 cooldown_end = time.time() + 3600
+                                 self.dns_cooldowns[incident.node_name] = cooldown_end
+                                 
+                                 # Persist to DB
+                                 self.db.save_dns_state(incident.node_name, deleted_ip, cooldown_end)
+                                 
+                                 self._trigger_alert(Alert("INFO", f"🚫 Node {incident.node_name} removed from DNS (Cooldown 1h)"), alerts)
+                             else:
+                                 logging.warning(f"Could not remove DNS for {incident.node_name} (Record not found?)")
                     # -------------------------------------------
                     
                 elif verdict == "IGNORE":
                      incident.state = Incident.STATE_RESOLVED
                      incident.status = "False Positive (AI)"
-                     self.active_incidents.pop(name)
+                     # FIX: Use name instead of Incident object which might fail if removed
+                     if name in self.active_incidents:
+                         del self.active_incidents[name]
                      self.db.save_incident(incident.__dict__)
 
         elif incident.state == Incident.STATE_CONFIRMED:
             # Still failing...
-            # --- PHASE 12: COOLDOWN EXPIRY & TRIAL ---
+            # --- PHASE 12 & 14: COOLDOWN EXPIRY & RESTORATION ---
             cooldown_end = self.dns_cooldowns.get(name, 0)
             if cooldown_end > 0 and time.time() > cooldown_end:
                  # Cooldown passed. Re-add DNS for TRIAL.
                  logging.info(f"Cooldown expired for {name}. RESTORING DNS.")
                  
-                 # Try to fetch node IP from Remnawave
-                 try:
-                     nodes = await self.remnawave.get_nodes()
-                     node_info = next((n for n in nodes if n.get("name") == name), None)
-                     
-                     ip = None
-                     if node_info:
-                         # Try typical fields
-                         ip = node_info.get("address") or node_info.get("ip")
+                 ip = None
+                 # Phase 14: Try to get original IP from DB first
+                 dns_state = self.db.get_dns_state(name)
+                 if dns_state:
+                     ip = dns_state.get("original_ip")
+                     logging.info(f"Found saved IP for {name}: {ip}")
+                 
+                 # Fallback to Remnawave API if IP missing
+                 if not ip:
+                     try:
+                         nodes = await self.remnawave.get_nodes()
+                         node_info = next((n for n in nodes if n.get("name") == name), None)
+                         if node_info:
+                             ip = node_info.get("address") or node_info.get("ip")
+                     except Exception as e:
+                         logging.error(f"Failed to fetch IP from API: {e}")
                          
-                     if ip and await self.cf.update_record(name, ip):
-                         # Restored!
-                         del self.dns_cooldowns[name]
-                         self._trigger_alert(Alert("INFO", f"✅ Node {name} DNS restored (Probation Trial)"), alerts)
-                     else:
-                         logging.warning(f"Could not restore DNS for {name}: IP not found or API failed.")
-                 except Exception as e:
-                     logging.error(f"Failed to restore DNS: {e}")
+                 if ip and await self.cf.update_record(name, ip):
+                     # Restored!
+                     del self.dns_cooldowns[name]
+                     self.db.clear_dns_state(name) # Clear persistence
+                     self._trigger_alert(Alert("INFO", f"✅ Node {name} DNS restored (Probation Trial)"), alerts)
+                 else:
+                     logging.warning(f"Could not restore DNS for {name}: IP not found.")
                 
         # B3. Re-Alert logic for Confirmed?
         # If confirmed, we already alerted. Maybe remind every hour?

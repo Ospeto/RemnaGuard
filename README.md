@@ -1,50 +1,56 @@
 # 🛡️ RemnaGuard
-
 **Autonomous AI Sentinel for Remnawave Clusters.**
 
-RemnaGuard is a high-performance monitoring bot designed to protect Remnawave (Xray/V2Ray) clusters from GFW probing, traffic throttling, and performance degradation. It integrates **Gemini AI** for intelligent baseline analysis and anomaly verification.
+RemnaGuard is a high-performance monitoring and self-healing system designed to protect Remnawave (Xray/V2Ray) clusters from GFW probing, traffic throttling, and performance degradation.
+
+```mermaid
+graph TD
+    A[Remnawave Panel] -->|Metrics| B(RemnaGuard Engine)
+    B -->|Logs| C{AI Verification}
+    C -->|Confirmed Block| D[Cloudflare DNS]
+    C -->|False Positive| E[Feedback Loop]
+    D -->|Remove IP| F[Penalty Box / Cooldown]
+    F -->|Timer Expired| D
+```
 
 ---
 
-## 🚀 Features
-
-### 📊 Real-Time Monitoring
-- **Deep Node Inspection**: Tracks Speed, Users, Efficiency (KB/s per user) every 30 seconds.
-- **Sparkline Graphs**: Visual 6-hour efficiency trends directly in Telegram.
-- **Top Nodes**: Live leaderboard of busiest servers.
+## 🚀 Advanced Features
 
 ### 🧠 AI-Powered Analysis (Gemini)
 - **Smart Baselines**: AI analyzes 24h history to set dynamic thresholds 4 times/day.
-- **Anti-False-Positive**: Intelligent verification of "suspicious" behavior before alerting.
-- **On-Demand Analysis**: Ask Gemini to analyze a specific node's performance trend.
-- **Multi-Model Support**: Switch between `gemini-pro`, `gemini-1.5-flash`, etc.
+- **Verification Engine**: Before alerting, Gemini verifies if a drop is a "Real Block" or a "Quiet Period".
+- **Feedback Loop (New)**: Use 👍/👎 buttons in Telegram to train the AI. "Wrong" verdicts are saved as negative examples for future prompts.
+- **Model Selector**: Switch between `gemini-pro`, `gemini-1.5-flash`, and others on the fly.
 
-### 🛡️ Autonomous Defense
-- **Zero Throughput Detection**: Identifies "zombie" nodes that appear online but move no traffic.
-- **Efficiency Throttling**: Detects GFW throttling patterns (high users, low speed).
-- **Silent Logging**: Records "SUSPICIOUS" events that don't trigger alerts for later analysis.
+### 🛡️ Cloudflare Self-Healing (Beta)
+RemnaGuard can automatically manage your DNS to bypass GFW throttling:
+- **Automatic Ban**: If Gemini confirms a node is blocked/throttled, RemnaGuard removes its `A` record from Cloudflare.
+- **Cooldown Box**: Banned nodes are held in a "Penalty Box" for 1 hour to let GFW sessions expire.
+- **Auto-Recovery**: After the cooldown, the node is re-added to DNS for a "Probation Trial".
 
-### 📈 Analytics & Exports
-- **Daily Digest**: Midnight summary of peak users, incidents, and cluster efficiency.
-- **Uptime Reports**: 7-day availability tracking.
-- **Database Export**: Download your full SQLite history for external analysis.
+### 📊 Visualization & Reporting
+- **Sparkline Trends**: 6-hour efficiency graphs visualized in ASCII.
+- **Daily Digest**: Midnight summaries of cluster health, incidents, and peak usage.
+- **Uptime Tracking**: 7-day availability percentages for every node.
 
 ---
 
-## 🛠️ Installation
+## 🛠️ Configuration
 
-### Quick Start
+### 1. Environment Variables (`.env`)
+| Variable | Description |
+|:---|:---|
+| `GEMINI_API_KEY` | Your Google AI Studio key. |
+| `CLOUDFLARE_API_TOKEN` | Token with `Zone.DNS` edit permissions. |
+| `BOT_MODE` | `polling` (Master) or `notify-only` (Worker). |
+
+### 2. DNS Mapping Script
+Instead of editing JSON manually, use our interactive wizard:
 ```bash
-git clone https://github.com/YourRepo/RemnaGuard.git
-cd RemnaGuard
-./install.sh
+./setup_dns.sh
 ```
-
-### Configuration
-The installer will prompt you for:
-- **Remnawave URL/Token**: For API access.
-- **Telegram Bot Token**: For notifications.
-- **Gemini API Key**: For AI features (Optional but recommended).
+This script helps you map Remnawave Node Names to your Cloudflare domains and set Proxy (Orange Cloud) status.
 
 ---
 
@@ -52,42 +58,35 @@ The installer will prompt you for:
 
 | Command | Description |
 |:---|:---|
-| **/start** | Open the interactive dashboard menu |
-| **/status** | View system health and API connectivity |
-| **/nodes** | List all monitored nodes and their status |
-| **/top** | Show top 5 busiest nodes |
-| **/graph** | View 6-hour efficiency sparklines |
-| **/node [name]** | Detailed stats and AI analysis for a node |
-| **/uptime** | 7-Day uptime percentages |
-| **/digest** | View today's cluster performance summary |
-| **/alerts** | View recent 10 alerts |
-| **/reports** | View history of silent/resolved incidents |
-| **/config** | Interactive threshold editor |
-| **/export** | 📦 Download the `remnaguard.db` database file |
-| **/analyze [name]** | 🧠 Ask AI to analyze a specific node's history |
-| **/ai_model** | 🧠 Switch Gemini models (Pro/Flash/etc) |
+| **/start** | Main Dashboard & Menu |
+| **/dns_status** | View active Cloudflare bans and cooldown timers |
+| **/analyze [node]** | Ask Gemini for a deep-dive performance analysis |
+| **/ai_model** | Change the active Gemini model |
+| **/config** | Edit monitoring thresholds without restarting |
+| **/export** | 📦 Download the database for backup |
+| **/uptime** | View 7-day availability stats |
 
 ---
 
 ## 🐳 Docker Management
 
-**Restarting** (Updates code changes):
+**Restarting** (Apply changes):
 ```bash
 docker compose restart remnaguard
 ```
 
-**Viewing Logs**:
+**Live Logs**:
 ```bash
 docker compose logs -f remnaguard
 ```
 
-**Rebuilding** (Updates dependencies):
-```bash
-./install.sh
-# Check "Force Rebuild" if prompted
-```
-
 ---
 
-## 📝 License
-MIT License. Built for the Remnawave Community.
+## 📝 Troubleshooting
+- **AI not responding?** Check `GEMINI_API_KEY` in `.env`.
+- **DNS not rotating?** Ensure the `Node Name` in Remnawave matches the name in `setup_dns.sh`.
+- **Bot crashes?** View logs and look for `AttributeError`. Ensure you have run `./install.sh` to update dependencies.
+
+---
+Built for the Remnawave Community. MIT License.
+

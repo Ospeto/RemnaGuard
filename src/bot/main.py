@@ -892,10 +892,22 @@ class TelegramBot:
             # Save to DB
             self.health_service.db.save_feedback(node_name, context_summary, verdict, rating)
             
+            # Phase 14: SMART UNDO
+            # If user says "WRONG" (👎) and node is currently banned, UNBAN IT.
+            undo_msg = ""
+            if rating == "WRONG" and node_name in self.health_service.dns_cooldowns:
+                # Force cooldown expiry
+                self.health_service.dns_cooldowns[node_name] = 0.0
+                undo_msg = "\n🛡️ **Smart Undo Triggered**: DNS restoration queued."
+                logging.info(f"Smart Undo: Triggering early restoration for {node_name}")
+
             await callback.answer(f"Thanks! Feedback recorded: {rating}")
             
             # Remove buttons to prevent double voting
             await callback.message.edit_reply_markup(reply_markup=None)
+            
+            if undo_msg:
+                 await self.bot.send_message(callback.message.chat.id, undo_msg, parse_mode="Markdown")
             
         except Exception as e:
             logging.error(f"Feedback callback failed: {e}")

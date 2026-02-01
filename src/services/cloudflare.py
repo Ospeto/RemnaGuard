@@ -126,16 +126,16 @@ class CloudflareService:
                 logging.error(f"Cloudflare API error: {e}")
                 return False
 
-    async def delete_record(self, node_name: str) -> bool:
-        """Remove A record for the node (Incident Response)."""
-        if not self.enabled: return False
+    async def delete_record(self, node_name: str) -> Optional[str]:
+        """Remove A record and return the IP that was deleted."""
+        if not self.enabled: return None
         
         config = self.mappings.get(node_name)
-        if not config: return False
+        if not config: return None
         
         domain = config["domain"]
         zone_id = await self.get_zone_id(domain)
-        if not zone_id: return False
+        if not zone_id: return None
 
         async with httpx.AsyncClient() as client:
             try:
@@ -149,19 +149,21 @@ class CloudflareService:
                 records = resp.json().get("result", [])
                 
                 if not records:
-                    return True # Already gone
+                    return None # Already gone
                 
                 record_id = records[0]["id"]
+                params_ip = records[0]["content"] # Capture IP
+                
                 resp = await client.delete(
                     f"{self.BASE_URL}/zones/{zone_id}/dns_records/{record_id}",
                     headers=headers
                 )
                 
                 if resp.json().get("success"):
-                     logging.info(f"DNS Record DELETED: {domain}")
-                     return True
-                return False
+                     logging.info(f"DNS Record DELETED: {domain} (was {params_ip})")
+                     return params_ip
+                return None
                 
             except Exception as e:
                 logging.error(f"Cloudflare Delete failed: {e}")
-                return False
+                return None

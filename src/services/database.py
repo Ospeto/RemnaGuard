@@ -76,6 +76,16 @@ class DatabaseService:
                 )
             ''')
             
+            # DNS State Table (Phase 14)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dns_state (
+                    node_name TEXT PRIMARY KEY,
+                    original_ip TEXT,
+                    cooldown_end REAL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             # Daily stats (for digest reports)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS daily_stats (
@@ -334,3 +344,30 @@ class DatabaseService:
             ''', (limit,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
+
+    # === DNS PERSISTENCE (PHASE 14) ===
+
+    def save_dns_state(self, node_name: str, ip: str, cooldown_end: float):
+        with self._get_connection() as conn:
+            conn.execute('''
+                INSERT OR REPLACE INTO dns_state (node_name, original_ip, cooldown_end)
+                VALUES (?, ?, ?)
+            ''', (node_name, ip, cooldown_end))
+
+    def get_dns_state(self, node_name: str) -> Optional[Dict]:
+        with self._get_connection() as conn:
+            cursor = conn.execute('SELECT original_ip, cooldown_end FROM dns_state WHERE node_name = ?', (node_name,))
+            row = cursor.fetchone()
+            if row:
+                return {"original_ip": row[0], "cooldown_end": row[1]}
+            return None
+
+    def clear_dns_state(self, node_name: str):
+        with self._get_connection() as conn:
+            conn.execute('DELETE FROM dns_state WHERE node_name = ?', (node_name,))
+
+    def get_all_active_bans(self) -> Dict[str, float]:
+        """Return {node_name: cooldown_end} for all tracked bans."""
+        with self._get_connection() as conn:
+            cursor = conn.execute('SELECT node_name, cooldown_end FROM dns_state')
+            return {row[0]: row[1] for row in cursor.fetchall()}
