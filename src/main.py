@@ -1,6 +1,10 @@
 import asyncio
 import os
 import logging
+from dotenv import load_dotenv
+
+# Load env vars from .env if available
+load_dotenv()
 from .services.remnawave import RemnawaveClient
 from .bot.main import TelegramBot
 
